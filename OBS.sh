@@ -127,31 +127,58 @@ log_event() {
 # ---------------------------------------------------------------------------
 # Audio alerts
 # ---------------------------------------------------------------------------
+# sink_is_ready: 0 = unknown/missing, 1 = present
+sink_is_ready() {
+    command -v pactl &>/dev/null || return 1
+    pactl list short sinks 2>/dev/null | awk '{print $2}' | grep -qx "$SINK_NAME"
+}
+
 setup_audio_sink() {
     command -v pactl &>/dev/null || return 0
-    pactl list short sinks 2>/dev/null | grep -q "$SINK_NAME" && return 0
+    sink_is_ready && return 0
     pactl load-module module-null-sink sink_name="$SINK_NAME" \
         sink_properties=device.description="$SINK_NAME" &>/dev/null || true
 }
 
 play_alert() {
-    command -v mpv &>/dev/null || { echo "${DIM}(mpv missing - silent alert)${NC}"; return 0; }
-    [ -f "$ALERT_SOUND" ] || { echo "${DIM}(alert file missing - silent)${NC}"; return 0; }
-
-    local sink_exists=0
-    if command -v pactl &>/dev/null; then
-        if pactl list short sinks 2>/dev/null | grep -q "$SINK_NAME"; then
-            sink_exists=1
-        fi
+    if [[ ! -f "$ALERT_SOUND" ]]; then
+        echo "${DIM}(alert file not found: $ALERT_SOUND)${NC}"
+        return 0
     fi
 
-    if (( sink_exists )); then
-        mpv --no-video --volume=70 --audio-device="pulse/$SINK_NAME" \
-            "$ALERT_SOUND" &>/dev/null &
+    # Pick whichever player is available. mpv first because it is what the
+    # project shipped with originally; fall back to paplay / ffplay / cvlc so
+    # the script still bleeps on a minimal install.
+    local player=()
+    if    command -v mpv    &>/dev/null; then player=(mpv --no-video --volume=70)
+    elif  command -v paplay &>/dev/null; then player=(paplay)
+    elif  command -v ffplay &>/dev/null; then player=(ffplay -nodisp -autoexit)
+    elif  command -v cvlc   &>/dev/null; then player=(cvlc --play-and-exit --no-video --volume=70)
     else
-        mpv --no-video --volume=70 "$ALERT_SOUND" &>/dev/null &
+        echo "${DIM}(no audio player found - install mpv / paplay / ffplay)${NC}"
+        return 0
     fi
-    ALERT_PID=$!
+
+    # Self-heal the OBS sink: recreate it if it vanished since startup
+    # (e.g. PulseAudio was restarted). Without this, sink_is_ready fails and
+    # we fall back to the default output, which OBS can't capture.
+    if ! sink_is_ready; then
+        setup_audio_sink
+    fi
+
+    if sink_is_ready; then
+        # PULSE_SINK routes any PulseAudio client through our virtual sink,
+        # so OBS captures the alert independently of the user's mic. This is
+        # far more portable than mpv's --audio-device flag, whose format has
+        # changed across mpv versions (pulse/<name> vs. alsa/<name> vs ...).
+        PULSE_SINK="$SINK_NAME" "${player[@]}" "$ALERT_SOUND" &>/dev/null &
+        ALERT_PID=$!
+        echo "${DIM}-> alert on OBS sink ($SINK_NAME)${NC}"
+    else
+        "${player[@]}" "$ALERT_SOUND" &>/dev/null &
+        ALERT_PID=$!
+        echo "${YELLOW}-> alert on default device (OBS sink unavailable)${NC}"
+    fi
 }
 
 # ---------------------------------------------------------------------------
