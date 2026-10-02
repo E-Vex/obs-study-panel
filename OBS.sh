@@ -295,6 +295,10 @@ run_phase() {
     fi
 
     local total=$(( minutes * 60 )) elapsed=0
+    # Count against the shell's wall-clock ($SECONDS) instead of adding 1 per
+    # loop: each iteration costs a bit more than 1s (file writes, redraw), so
+    # a naive counter makes a 50 min phase run noticeably longer.
+    local start=$SECONDS
 
     write_session "$label" "$round" "$total_rounds"
     log_event "Start: $label $round/$total_rounds ($minutes min)"
@@ -308,7 +312,7 @@ run_phase() {
         update_date_day
         draw_status "$label" "$round" "$total_rounds" "$elapsed" "$total" "$t"
         sleep 1
-        elapsed=$(( elapsed + 1 ))
+        elapsed=$(( SECONDS - start ))
     done
 
     echo "00:00:00" > "$TIMER_FILE"
