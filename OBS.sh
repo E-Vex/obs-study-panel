@@ -23,8 +23,11 @@ NC=$'\e[0m'
 # Argument parsing & validation
 # ---------------------------------------------------------------------------
 usage() {
-    echo "Usage: $0 <rounds> <study_minutes> <break_minutes>"
-    echo "Example: $0 5 50 10"
+    {
+        echo "Usage: $0 <rounds> <study_minutes> <break_minutes>"
+        echo "Example: $0 5 50 10"
+        echo "Limits:  rounds 1-50, study 1-600 min, break 1-120 min"
+    } >&2
     exit 1
 }
 
@@ -35,13 +38,15 @@ STUDY_MIN=$2
 BREAK_MIN=$3
 
 # Must be positive integers; reject leading-zero forms and silly ranges.
+# At most 4 digits: longer numbers would overflow bash's 64-bit arithmetic and
+# wrap around to a small value, slipping past the range checks below.
 for val in "$ROUNDS" "$STUDY_MIN" "$BREAK_MIN"; do
-    [[ "$val" =~ ^[1-9][0-9]*$ ]] || usage
+    [[ "$val" =~ ^[1-9][0-9]{0,3}$ ]] || usage
 done
 # Hard caps to prevent runaway countdowns / disk fill.
-(( ROUNDS    <= 50 )) || { echo "Error: rounds must be <= 50";  usage; }
-(( STUDY_MIN <= 600 )) || { echo "Error: study minutes must be <= 600"; usage; }
-(( BREAK_MIN <= 120 )) || { echo "Error: break minutes must be <= 120"; usage; }
+(( ROUNDS    <= 50 ))  || { echo "Error: rounds must be <= 50" >&2;  usage; }
+(( STUDY_MIN <= 600 )) || { echo "Error: study minutes must be <= 600" >&2; usage; }
+(( BREAK_MIN <= 120 )) || { echo "Error: break minutes must be <= 120" >&2; usage; }
 
 # ---------------------------------------------------------------------------
 # Paths and runtime state
@@ -66,6 +71,7 @@ QUOTES=(
 )
 
 POINTS=0
+LAST_DATE=""
 
 # ---------------------------------------------------------------------------
 # Startup logo
@@ -73,28 +79,35 @@ POINTS=0
 print_logo() {
     echo "${MAGENTA}"
     cat <<'EOF'
-   ______   ______   ______   __    __   ______    ______
-  /      \ /      \ /      \ /  |  /  | /      \  /      \
- /$$$$$$  |/$$$$$$  |/$$$$$$  |$$ |  $$ |/$$$$$$  |/$$$$$$  |
- $$ |  $$/ $$ |  $$ |$$ |  $$ |$$ |__$$ |$$ |  $$ |$$ \__$$ |
- $$ |      $$ |  $$ |$$ |  $$ |$$    $$ |$$ |  $$ |$$    $$ |
- $$ |   __ $$ |  $$ |$$ |  $$ |$$$$$$$$ |$$ |  $$ |$$$$$$$$ |
- $$ \__/  |$$ \__$$ |$$ \__$$ |$$ |  $$ |$$ \__$$ |$$ |  $$ |
- $$    $$/ $$    $$/ $$    $$/ $$ |  $$ |$$    $$/ $$ |  $$ |
-  $$$$$$/   $$$$$$/   $$$$$$/   $$/   $$/  $$$$$$/   $$/   $$/
+ /$$$$$$$$      /$$    /$$ /$$$$$$$$ /$$   /$$
+| $$_____/     | $$   | $$| $$_____/| $$  / $$
+| $$           | $$   | $$| $$      |  $$/ $$/
+| $$$$$ /$$$$$$|  $$ / $$/| $$$$$    \  $$$$/
+| $$__/|______/ \  $$ $$/ | $$__/     >$$  $$
+| $$             \  $$$/  | $$       /$$/\  $$
+| $$$$$$$$        \  $/   | $$$$$$$$| $$  \ $$
+|________/         \_/    |________/|__/  |__/
 EOF
     echo "${NC}"
     echo "${MAGENTA}${BOLD}     Study / Break Timer Protocol${NC}"
-    echo "${DIM}__ live state written to date · day · session · timer · log${NC}"
+    echo "${DIM}── live state written to date · day · session · timer · log${NC}"
     echo
 }
 
 # ---------------------------------------------------------------------------
 # OBS state files
 # ---------------------------------------------------------------------------
+# Called every tick, but only touches the files when the date actually changes
+# (so a session running past midnight rolls over). Uses printf's %()T builtin,
+# so there are no `date` forks in the loop.
 update_date_day() {
-    date '+%Y-%m-%d' > "$DATE_FILE"
-    date '+%A'      > "$DAY_FILE"
+    local d dow
+    printf -v d '%(%Y-%m-%d)T' -1
+    [[ "$d" == "$LAST_DATE" ]] && return 0
+    LAST_DATE=$d
+    printf -v dow '%(%A)T' -1
+    printf '%s\n' "$d"   > "$DATE_FILE"
+    printf '%s\n' "$dow" > "$DAY_FILE"
 }
 
 write_session() {
@@ -112,7 +125,10 @@ log_event() {
 # sink_is_ready: 0 = unknown/missing, 1 = present
 sink_is_ready() {
     command -v pactl &>/dev/null || return 1
-    pactl list short sinks 2>/dev/null | awk '{print $2}' | grep -qx "$SINK_NAME"
+    # Single awk instead of `awk | grep -q`: under `pipefail`, grep -q exiting
+    # early can SIGPIPE awk and make a present sink look missing.
+    pactl list short sinks 2>/dev/null \
+        | awk -v name="$SINK_NAME" '$2 == name { found = 1 } END { exit !found }'
 }
 
 setup_audio_sink() {
@@ -122,7 +138,23 @@ setup_audio_sink() {
         sink_properties=device.description="$SINK_NAME" &>/dev/null || true
 }
 
+stop_alert() {
+    if (( ALERT_PID > 0 )); then
+        kill "$ALERT_PID" 2>/dev/null
+        ALERT_PID=0
+    fi
+}
+
+# Throw away anything typed while the timer was running, so a stray Enter
+# can't silently skip the "Press Enter to continue" pause.
+discard_pending_input() {
+    [[ -t 0 ]] || return 0
+    local _junk
+    while IFS= read -r -s -t 0.01 -n 1 _junk; do :; done
+}
+
 play_alert() {
+    stop_alert   # never let two alarms overlap
     if [[ ! -f "$ALERT_SOUND" ]]; then
         echo "${DIM}(alert file not found: $ALERT_SOUND)${NC}"
         return 0
@@ -205,21 +237,37 @@ draw_status() {
         "$MAGENTA" "$POINTS" "$NC"
 }
 
+BOX_INNER=62
+
+# box_row <border color> <visible text> <styled text>
+# Padding is computed from the *visible* text, because ANSI escape codes take
+# bytes but no screen columns (printf %-62s would count them and skew the box).
+box_row() {
+    local color=$1 plain=$2 styled=$3
+    local pad=$(( BOX_INNER - ${#plain} ))
+    (( pad < 0 )) && pad=0
+    printf '%s║%s%*s%s║%s\n' "$color" "$styled" "$pad" "" "$color" "$NC"
+}
+
 phase_header() {
     # $1 = label, $2 = round, $3 = total, $4 = minutes, $5 = subtitle
-    local label=$1 round=$2 total=$3 minutes=$4 subtitle=$5
-    local color
+    local label=$1 round=$2 total=$3 minutes=$4 subtitle=${5:0:$(( BOX_INNER - 4 ))}
+    local color bar
     if [[ "$label" == "STUDY" ]]; then
         color="$MAGENTA"
     else
         color="$PURPLE"
     fi
+    printf -v bar '%*s' "$BOX_INNER" ''
+    bar=${bar// /═}
+
+    local info="${label}  ·  Round ${round} / ${total}  ·  ${minutes} min"
     echo
-    echo "${color}╔══════════════════════════════════════════════════════════════╗${NC}"
-    printf '%s║%-62s%s\n' "$color" \
-        "  ${BOLD}${label}${NC}${color}  ·  Round ${round} / ${total}  ·  ${minutes} min" "$NC"
-    printf '%s║%-62s%s\n' "$color" "  ${DIM}${subtitle}${NC}${color}" "$NC"
-    echo "${color}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo "${color}╔${bar}╗${NC}"
+    box_row "$color" "  ${info}" \
+        "  ${BOLD}${label}${NC}${color}  ·  Round ${round} / ${total}  ·  ${minutes} min"
+    box_row "$color" "  ${subtitle}" "  ${DIM}${subtitle}${NC}${color}"
+    echo "${color}╚${bar}╝${NC}"
     echo
 }
 
@@ -264,9 +312,13 @@ show_completion() {
 # ---------------------------------------------------------------------------
 # Phase runner
 # ---------------------------------------------------------------------------
+minutes_label() {
+    if (( $1 == 1 )); then echo "1 minute"; else echo "$1 minutes"; fi
+}
+
 run_phase() {
     local type=$1 minutes=$2 round=$3 total_rounds=$4
-    local label subtitle next_phase
+    local label subtitle next_phase t
 
     if [[ "$type" == "study" ]]; then
         label="STUDY"
@@ -286,9 +338,6 @@ run_phase() {
     log_event "Start: $label $round/$total_rounds ($minutes min)"
     phase_header "$label" "$round" "$total_rounds" "$minutes" "$subtitle"
 
-    # Update date/day once at phase start instead of every second
-    update_date_day
-
     local status_counter=0
     local status_interval=5  # Redraw terminal status every 5 seconds
 
@@ -297,6 +346,7 @@ run_phase() {
         printf -v t '%02d:%02d:%02d' \
             $((remaining/3600)) $((remaining%3600/60)) $((remaining%60))
         printf '%s\n' "$t" > "$TIMER_FILE"
+        update_date_day
 
         # Only redraw terminal status every N seconds, not every iteration
         if (( status_counter % status_interval == 0 )); then
@@ -309,6 +359,9 @@ run_phase() {
     done
 
     echo "00:00:00" > "$TIMER_FILE"
+    # Final redraw so the bar ends at 100% / 00:00:00 instead of whatever the
+    # last throttled update (up to 5s earlier) happened to show.
+    draw_status "$label" "$round" "$total_rounds" "$total" "$total" "00:00:00"
     printf '\n'
     log_event "End: $label $round/$total_rounds"
 
@@ -317,17 +370,19 @@ run_phase() {
 
     if [[ "$type" == "study" ]]; then
         if (( round < total_rounds )); then
-            next_phase="Break ($BREAK_MIN minutes)"
+            next_phase="Break ($(minutes_label "$BREAK_MIN"))"
         else
             next_phase="None"
         fi
     else
-        next_phase="Study ($STUDY_MIN minutes)"
+        next_phase="Study ($(minutes_label "$STUDY_MIN"))"
     fi
 
+    discard_pending_input
     show_completion "$label" "$round" "$total_rounds" "$next_phase"
     # Block until user is ready. No input besides Enter needed.
     read -r _
+    stop_alert   # silence the alarm once the user has acknowledged it
     echo
 }
 
@@ -335,20 +390,25 @@ run_phase() {
 # Cleanup
 # ---------------------------------------------------------------------------
 cleanup() {
+    local code=${1:-0}
+    trap '' INT TERM HUP   # ignore repeated signals while shutting down
     # Kill any in-flight audio so the alert doesn't keep going after exit.
-    if (( ALERT_PID > 0 )); then
-        kill "$ALERT_PID" 2>/dev/null
-        ALERT_PID=0
-    fi
-    echo
+    stop_alert
+    # Reset the OBS files first: on SIGHUP the terminal is already gone and
+    # printing may fail, but the stream must not keep showing a frozen timer.
     echo "stopped"     > "$SESSION_FILE"
     echo "00:00:00"    > "$TIMER_FILE"
     log_event "Protocol stopped manually"
-    echo
-    echo "${PURPLE}${BOLD}Interrupted.${NC} ${DIM}State files reset to stopped.${NC}"
-    exit 0
+    {
+        echo
+        echo "${PURPLE}${BOLD}Interrupted.${NC} ${DIM}State files reset to stopped.${NC}"
+    } 2>/dev/null
+    exit "$code"
 }
-trap cleanup INT TERM
+# Conventional exit codes: 128 + signal number.
+trap 'cleanup 130' INT
+trap 'cleanup 143' TERM
+trap 'cleanup 129' HUP
 
 # ---------------------------------------------------------------------------
 # Main
