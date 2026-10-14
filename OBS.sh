@@ -304,13 +304,24 @@ run_phase() {
     log_event "Start: $label $round/$total_rounds ($minutes min)"
     phase_header "$label" "$round" "$total_rounds" "$minutes" "$subtitle"
 
+    # Update date/day once at phase start instead of every second
+    update_date_day
+
+    local status_counter=0
+    local status_interval=5  # Redraw terminal status every 5 seconds
+
     while (( elapsed < total )); do
         local remaining=$(( total - elapsed ))
         printf -v t '%02d:%02d:%02d' \
             $((remaining/3600)) $((remaining%3600/60)) $((remaining%60))
-        echo "$t" > "$TIMER_FILE"
-        update_date_day
-        draw_status "$label" "$round" "$total_rounds" "$elapsed" "$total" "$t"
+        printf '%s\n' "$t" > "$TIMER_FILE"
+
+        # Only redraw terminal status every N seconds, not every iteration
+        if (( status_counter % status_interval == 0 )); then
+            draw_status "$label" "$round" "$total_rounds" "$elapsed" "$total" "$t"
+        fi
+        status_counter=$(( status_counter + 1 ))
+
         sleep 1
         elapsed=$(( SECONDS - start ))
     done
