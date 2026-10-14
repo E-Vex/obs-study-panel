@@ -11,10 +11,12 @@
 set -uo pipefail
 
 # ---------------------------------------------------------------------------
-# Terminal colors
+# Terminal colors - Purple theme
 # ---------------------------------------------------------------------------
 RED=$'\e[0;31m'
 GREEN=$'\e[0;32m'
+PURPLE=$'\e[0;35m'
+MAGENTA=$'\e[1;35m'
 CYAN=$'\e[0;36m'
 YELLOW=$'\e[1;33m'
 BOLD=$'\e[1m'
@@ -73,38 +75,22 @@ POINTS=0
 # Startup logo
 # ---------------------------------------------------------------------------
 print_logo() {
-    # Compact figlet banner; degrades gracefully if figlet / slant font missing.
-    if command -v figlet &>/dev/null; then
-        if figlet -f slant -w 80 "E-Vex" 2>/dev/null | head -n 6 \
-                | sed 's/[[:space:]]*$//' | grep -q .; then
-            echo "${CYAN}"
-            figlet -f slant -w 80 "E-Vex" 2>/dev/null \
-                | head -n 6 | sed 's/[[:space:]]*$//'
-            echo "${NC}"
-        else
-            print_logo_fallback
-        fi
-    else
-        print_logo_fallback
-    fi
-
-    echo "${YELLOW}${BOLD}Study / Break Timer Protocol${NC}"
-    echo "${DIM}── live state written to date · day · session · timer · log${NC}"
-    echo
-}
-
-print_logo_fallback() {
-    # Compact block-letter banner rendered with plain ASCII so it works on
-    # any terminal without external tools.
-    echo "${CYAN}"
+    echo "${MAGENTA}"
     cat <<'EOF'
-  ___  ____  __    __  _____
- | _ \/ ___| \ \  / / |___  |
- | |_) \___ \  \ \/ /     / /
- |  _ < ___) |  \  /     / /
- |_| \_\____/    \/     /_/
+   ______   ______   ______   __    __   ______    ______
+  /      \ /      \ /      \ /  |  /  | /      \  /      \
+ /$$$$$$  |/$$$$$$  |/$$$$$$  |$$ |  $$ |/$$$$$$  |/$$$$$$  |
+ $$ |  $$/ $$ |  $$ |$$ |  $$ |$$ |__$$ |$$ |  $$ |$$ \__$$ |
+ $$ |      $$ |  $$ |$$ |  $$ |$$    $$ |$$ |  $$ |$$    $$ |
+ $$ |   __ $$ |  $$ |$$ |  $$ |$$$$$$$$ |$$ |  $$ |$$$$$$$$ |
+ $$ \__/  |$$ \__$$ |$$ \__$$ |$$ |  $$ |$$ \__$$ |$$ |  $$ |
+ $$    $$/ $$    $$/ $$    $$/ $$ |  $$ |$$    $$/ $$ |  $$ |
+  $$$$$$/   $$$$$$/   $$$$$$/   $$/   $$/  $$$$$$/   $$/   $$/
 EOF
     echo "${NC}"
+    echo "${MAGENTA}${BOLD}     Study / Break Timer Protocol${NC}"
+    echo "${DIM}__ live state written to date · day · session · timer · log${NC}"
+    echo
 }
 
 # ---------------------------------------------------------------------------
