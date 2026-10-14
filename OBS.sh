@@ -13,7 +13,6 @@ set -uo pipefail
 # ---------------------------------------------------------------------------
 # Terminal colors - Purple theme
 # ---------------------------------------------------------------------------
-RED=$'\e[0;31m'
 PURPLE=$'\e[0;35m'
 MAGENTA=$'\e[1;35m'
 BOLD=$'\e[1m'
@@ -203,7 +202,7 @@ draw_status() {
         "$round" "$total_rounds" \
         "$color" "$bar" "$NC" \
         "$pct" "$remaining_str" \
-        "$YELLOW" "$POINTS" "$NC"
+        "$MAGENTA" "$POINTS" "$NC"
 }
 
 phase_header() {
@@ -251,7 +250,7 @@ show_completion() {
     echo "${color}${line}${NC}"
     echo
     printf '  Round:   %s%d%s / %d\n'        "$BOLD" "$round" "$NC" "$total_rounds"
-    printf '  Points:  %s%d%s\n'             "$YELLOW" "$POINTS" "$NC"
+    printf '  Points:  %s%d%s\n'             "$MAGENTA" "$POINTS" "$NC"
     echo
     if [[ "$next_phase" == "None" ]]; then
         printf '  Next:    %sSession complete%s\n' "$DIM" "$NC"
@@ -259,7 +258,7 @@ show_completion() {
         printf '  Next:    %s%s%s\n' "$BOLD" "$next_phase" "$NC"
     fi
     echo
-    printf '  %sPress Enter to continue...%s' "$YELLOW" "$NC"
+    printf '  %sPress Enter to continue...%s' "$MAGENTA" "$NC"
 }
 
 # ---------------------------------------------------------------------------
@@ -346,7 +345,7 @@ cleanup() {
     echo "00:00:00"    > "$TIMER_FILE"
     log_event "Protocol stopped manually"
     echo
-    echo "${RED}${BOLD}Interrupted.${NC} ${DIM}State files reset to stopped.${NC}"
+    echo "${PURPLE}${BOLD}Interrupted.${NC} ${DIM}State files reset to stopped.${NC}"
     exit 0
 }
 trap cleanup INT TERM
@@ -388,7 +387,7 @@ printf '%s#%s%s%s%s#%s\n' \
 echo "${MAGENTA}#                                                          #${NC}"
 echo "${MAGENTA}############################################################${NC}"
 echo
-printf '  %sTotal Rounds:%s  %s%d%s\n' "$BOLD" "$NC" "$YELLOW" "$ROUNDS" "$NC"
-printf '  %sTotal Points:%s %s%d%s\n' "$BOLD" "$NC" "$YELLOW" "$POINTS" "$NC"
+printf '  %sTotal Rounds:%s  %s%d%s\n' "$BOLD" "$NC" "$MAGENTA" "$ROUNDS" "$NC"
+printf '  %sTotal Points:%s %s%d%s\n' "$BOLD" "$NC" "$MAGENTA" "$POINTS" "$NC"
 echo
 echo "${MAGENTA}${BOLD}Great work!${NC} ${DIM}Exiting.${NC}"
