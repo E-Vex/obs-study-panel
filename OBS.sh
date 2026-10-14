@@ -14,11 +14,8 @@ set -uo pipefail
 # Terminal colors - Purple theme
 # ---------------------------------------------------------------------------
 RED=$'\e[0;31m'
-GREEN=$'\e[0;32m'
 PURPLE=$'\e[0;35m'
 MAGENTA=$'\e[1;35m'
-CYAN=$'\e[0;36m'
-YELLOW=$'\e[1;33m'
 BOLD=$'\e[1m'
 DIM=$'\e[2m'
 NC=$'\e[0m'
@@ -163,7 +160,7 @@ play_alert() {
     else
         "${player[@]}" "$ALERT_SOUND" &>/dev/null &
         ALERT_PID=$!
-        echo "${YELLOW}-> alert on default device (OBS sink unavailable)${NC}"
+        echo "${PURPLE}-> alert on default device (OBS sink unavailable)${NC}"
     fi
 }
 
@@ -195,9 +192,9 @@ draw_status() {
 
     local color
     if [[ "$label" == "STUDY" ]]; then
-        color="$GREEN"
+        color="$MAGENTA"
     else
-        color="$CYAN"
+        color="$PURPLE"
     fi
 
     printf '\r\033[K'
@@ -214,9 +211,9 @@ phase_header() {
     local label=$1 round=$2 total=$3 minutes=$4 subtitle=$5
     local color
     if [[ "$label" == "STUDY" ]]; then
-        color="$GREEN"
+        color="$MAGENTA"
     else
-        color="$CYAN"
+        color="$PURPLE"
     fi
     echo
     echo "${color}╔══════════════════════════════════════════════════════════════╗${NC}"
@@ -243,9 +240,9 @@ show_completion() {
 
     local color
     if [[ "$phase" == "STUDY" ]]; then
-        color="$GREEN"
+        color="$MAGENTA"
     else
-        color="$CYAN"
+        color="$PURPLE"
     fi
 
     echo
@@ -362,7 +359,7 @@ setup_audio_sink
 update_date_day
 log_event "Starting new study protocol: $ROUNDS rounds, $STUDY_MIN min study, $BREAK_MIN min break"
 
-echo "${YELLOW}Protocol:${NC} ${BOLD}${ROUNDS}${NC} rounds  ${DIM}|${NC}  ${BOLD}${STUDY_MIN}${NC} min study  ${DIM}|${NC}  ${BOLD}${BREAK_MIN}${NC} min break"
+echo "${PURPLE}Protocol:${NC} ${BOLD}${ROUNDS}${NC} rounds  ${DIM}|${NC}  ${BOLD}${STUDY_MIN}${NC} min study  ${DIM}|${NC}  ${BOLD}${BREAK_MIN}${NC} min break"
 echo
 
 for (( round=1; round<=ROUNDS; round++ )); do
@@ -382,16 +379,16 @@ log_event "Protocol complete - total points: $POINTS"
 # Final summary
 # ---------------------------------------------------------------------------
 echo
-echo "${GREEN}############################################################${NC}"
-echo "${GREEN}#                                                          #${NC}"
+echo "${MAGENTA}############################################################${NC}"
+echo "${MAGENTA}#                                                          #${NC}"
 printf '%s#%s%s%s%s#%s\n' \
-    "$GREEN" "$NC" "$BOLD" \
+    "$MAGENTA" "$NC" "$BOLD" \
     "$(printf '%-58s' 'ALL SESSIONS COMPLETE')" \
-    "$NC" "$GREEN"
-echo "${GREEN}#                                                          #${NC}"
-echo "${GREEN}############################################################${NC}"
+    "$NC" "$MAGENTA"
+echo "${MAGENTA}#                                                          #${NC}"
+echo "${MAGENTA}############################################################${NC}"
 echo
 printf '  %sTotal Rounds:%s  %s%d%s\n' "$BOLD" "$NC" "$YELLOW" "$ROUNDS" "$NC"
 printf '  %sTotal Points:%s %s%d%s\n' "$BOLD" "$NC" "$YELLOW" "$POINTS" "$NC"
 echo
-echo "${GREEN}${BOLD}Great work!${NC} ${DIM}Exiting.${NC}"
+echo "${MAGENTA}${BOLD}Great work!${NC} ${DIM}Exiting.${NC}"
