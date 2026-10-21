@@ -5,8 +5,9 @@
 # timer.txt, log.txt) for use as Text sources in OBS Studio.
 #
 # Usage:   ./OBS.sh [options] <rounds> <study_minutes> <break_minutes>
-# Example: ./OBS.sh 5 50 10   ->  5 rounds, 50 min study, 10 min break
-# Stop:    Ctrl+C
+# Example: ./OBS.sh 5 50 10            ->  5 rounds, 50 min study, 10 min break
+#          ./OBS.sh --dry-run 3 5 2    ->  3 rounds, 5 s study, 2 s break
+# Stop:    Ctrl+C, or press 'q' while a phase is running
 
 set -uo pipefail
 
@@ -64,11 +65,17 @@ LAST_DATE=""
 # Argument parsing & validation
 # ---------------------------------------------------------------------------
 CONFIG_FILE=""
+DRY_RUN=0
 USE_ALERT=1
 USE_SINK=1
 ROUNDS=""
 STUDY_MIN=""
 BREAK_MIN=""
+
+# "minutes" normally, "seconds" in --dry-run mode.
+DURATION_UNIT="minutes"
+# How many seconds one duration unit is worth.
+SECONDS_PER_UNIT=60
 
 usage() {
     {
@@ -77,6 +84,7 @@ usage() {
         echo "Options:"
         echo "  -h, --help          Show this help and exit"
         echo "  -c, --config FILE   Load settings from FILE (bash syntax)"
+        echo "  -d, --dry-run       Treat the durations as seconds (fast testing)"
         echo "  -n, --no-alert      Disable the audio alert"
         echo "  -s, --no-sink       Don't create or use the OBS virtual audio sink"
         echo
@@ -98,6 +106,7 @@ files that OBS Studio can display as "Text (read from file)" sources.
 Options:
   -h, --help          Show this help and exit
   -c, --config FILE   Load settings from FILE (bash syntax)
+  -d, --dry-run       Treat the durations as seconds (fast testing)
   -n, --no-alert      Disable the audio alert
   -s, --no-sink       Don't create or use the OBS virtual audio sink
 
@@ -106,7 +115,9 @@ Arguments:
   study_minutes      1-600  length of a study phase
   break_minutes      1-120  length of a break phase
 
-Example: $(basename "$0") 5 50 10
+Examples:
+  $(basename "$0") 5 50 10           # 5 rounds, 50 min study, 10 min break
+  $(basename "$0") --dry-run 3 5 2   # 3 rounds, 5 s study, 2 s break
 
 Environment overrides: ALERT_SOUND, SINK_NAME, QUOTES, STATE_DIR, MAX_LOG_BYTES
 EOF
@@ -117,6 +128,7 @@ while (( $# )); do
         -h|--help)      print_help; exit 0 ;;
         -c|--config)    [[ $# -ge 2 ]] || { echo "Error: $1 needs a file argument" >&2; usage; }
                         CONFIG_FILE=$2; shift 2 ;;
+        -d|--dry-run)   DRY_RUN=1; shift ;;
         -n|--no-alert)  USE_ALERT=0; shift ;;
         -s|--no-sink)   USE_SINK=0; shift ;;
         --)             shift; break ;;
@@ -140,6 +152,11 @@ done
 (( ROUNDS    <= 50 ))  || { echo "Error: rounds must be <= 50" >&2;  usage; }
 (( STUDY_MIN <= 600 )) || { echo "Error: study minutes must be <= 600" >&2; usage; }
 (( BREAK_MIN <= 120 )) || { echo "Error: break minutes must be <= 120" >&2; usage; }
+
+if (( DRY_RUN )); then
+    DURATION_UNIT="seconds"
+    SECONDS_PER_UNIT=1
+fi
 
 # ---------------------------------------------------------------------------
 # Configuration file
@@ -509,11 +526,11 @@ phase_header() {
     printf -v bar '%*s' "$BOX_INNER" ''
     bar=${bar// /═}
 
-    local info="${label}  ·  Round ${round} / ${total}  ·  ${minutes} min"
+    local info="${label}  ·  Round ${round} / ${total}  ·  ${minutes} ${DURATION_UNIT}"
     echo
     echo "${color}╔${bar}╗${NC}"
     box_row "$color" "  ${info}" \
-        "  ${BOLD}${label}${NC}${color}  ·  Round ${round} / ${total}  ·  ${minutes} min"
+        "  ${BOLD}${label}${NC}${color}  ·  Round ${round} / ${total}  ·  ${minutes} ${DURATION_UNIT}"
     box_row "$color" "  ${subtitle}" "  ${DIM}${subtitle}${NC}${color}"
     if [[ -t 0 ]]; then
         box_row "$color" "  p pause  ·  s skip  ·  q quit" \
@@ -567,8 +584,17 @@ show_completion() {
 # ---------------------------------------------------------------------------
 # Phase runner
 # ---------------------------------------------------------------------------
-minutes_label() {
-    if (( $1 == 1 )); then echo "1 minute"; else echo "$1 minutes"; fi
+duration_label() {
+    local n=$1
+    if (( n == 1 )); then
+        if [[ "$DURATION_UNIT" == "seconds" ]]; then
+            echo "1 second"
+        else
+            echo "1 minute"
+        fi
+    else
+        echo "$n $DURATION_UNIT"
+    fi
 }
 
 run_phase() {
@@ -586,15 +612,15 @@ run_phase() {
     # What comes after this phase, shown live in next.txt / overlay.txt.
     if [[ "$type" == "study" ]]; then
         if (( round < total_rounds )); then
-            next_phase="Break ($(minutes_label "$BREAK_MIN"))"
+            next_phase="Break ($(duration_label "$BREAK_MIN"))"
         else
             next_phase="None"
         fi
     else
-        next_phase="Study ($(minutes_label "$STUDY_MIN"))"
+        next_phase="Study ($(duration_label "$STUDY_MIN"))"
     fi
 
-    local total=$(( minutes * 60 )) elapsed=0
+    local total=$(( minutes * SECONDS_PER_UNIT )) elapsed=0
     # Count against the shell's wall-clock ($SECONDS) instead of adding 1 per
     # loop: each iteration costs a bit more than 1s (file writes, redraw), so
     # a naive counter makes a 50 min phase run noticeably longer.
@@ -613,7 +639,7 @@ run_phase() {
     [[ "$NEXT_TEXT" == "None" ]] && NEXT_TEXT="Session complete"
     MESSAGE_TEXT="$subtitle"
 
-    log_event "Start: $label $round/$total_rounds ($minutes min)"
+    log_event "Start: $label $round/$total_rounds ($(duration_label "$minutes"))"
     phase_header "$label" "$round" "$total_rounds" "$minutes" "$subtitle"
     update_date_day
     publish_state
@@ -730,9 +756,9 @@ trap 'cleanup 129' HUP
 print_logo
 setup_audio_sink
 update_date_day
-log_event "Starting new study protocol: $ROUNDS rounds, $STUDY_MIN min study, $BREAK_MIN min break"
+log_event "Starting new study protocol: $ROUNDS rounds, $(duration_label "$STUDY_MIN") study, $(duration_label "$BREAK_MIN") break"
 
-echo "${PURPLE}Protocol:${NC} ${BOLD}${ROUNDS}${NC} rounds  ${DIM}|${NC}  ${BOLD}${STUDY_MIN}${NC} min study  ${DIM}|${NC}  ${BOLD}${BREAK_MIN}${NC} min break"
+echo "${PURPLE}Protocol:${NC} ${BOLD}${ROUNDS}${NC} rounds  ${DIM}|${NC}  ${BOLD}${STUDY_MIN}${NC} $DURATION_UNIT study  ${DIM}|${NC}  ${BOLD}${BREAK_MIN}${NC} $DURATION_UNIT break"
 if [[ -n "$CONFIG_LOADED" ]]; then
     echo "${DIM}Config: $CONFIG_LOADED${NC}"
 fi
