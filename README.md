@@ -26,8 +26,10 @@ Limits: rounds 1-50, study 1-600 min, break 1-120 min (whole numbers only).
 
 When a phase ends the script waits for you to press `Enter` before starting the
 next one. Stop at any time with `Ctrl+C` (closing the terminal does the same):
-the OBS files are reset to `stopped` / `00:00:00`. Each finished phase earns a
-point, shown in the console when the session completes.
+the OBS files are reset to `stopped` / `00:00:00`. The same happens when the
+script dies unexpectedly, so the stream never keeps showing a frozen timer.
+Each finished phase earns a point, shown in the console when the session
+completes.
 
 ### Options
 
@@ -71,7 +73,8 @@ built-in default  <  config file  <  environment variable  <  command line
 
 The first file that exists is used:
 
-1. the file given with `--config FILE`
+1. the file given with `--config FILE` (always used, even when it is missing -
+   that is reported as an error)
 2. `$OBS_PANEL_CONFIG`
 3. `$XDG_CONFIG_HOME/obs-study-panel/config` (`~/.config/obs-study-panel/config`
    by default)
@@ -85,11 +88,16 @@ ALERT_SOUND="$HOME/Videos/Alarm/n_alarm.mp3"
 SINK_NAME="OBS_Alert_Sink"
 STATE_DIR="$HOME/obs-state"       # where the state files are written
 MAX_LOG_BYTES=1048576             # rotate log.txt past this size
+FILE_BAR_WIDTH=20                 # width of the bar in progress.txt
+NON_TTY_ENTER_TIMEOUT=300         # seconds to wait for Enter on a pipe
 QUOTE_LIST=(
   "Your future self is watching"
   "One more round, then the break is yours"
 )
 ```
+
+A config file with a syntax error is reported and the script stops; a config
+file whose last command returns non-zero is perfectly fine.
 
 ### Environment variables
 
@@ -145,6 +153,6 @@ file is missing, the script falls back to the default output / skips the sound.
 ./tests/run-tests.sh
 ```
 
-54 checks that run in about a minute, in `--dry-run` mode inside a throwaway
+69 checks that run in about a minute, in `--dry-run` mode inside a throwaway
 directory. The interactive keys and the signal handling are driven through a
 pty, and those tests are skipped when util-linux `script` is not installed.

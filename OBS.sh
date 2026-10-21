@@ -43,11 +43,24 @@ ENV_QUOTES="${QUOTES:-}"
 # environment variable (see load_config). Precedence, lowest to highest:
 #   built-in default  <  config file  <  environment variable  <  CLI flag
 # ---------------------------------------------------------------------------
-ALERT_SOUND="$HOME/Videos/Alarm/n_alarm.mp3"
+# HOME is not guaranteed to be set (a cron job or a container may not have
+# it), and "set -u" would abort the script on "$HOME".
+if [[ -n "${HOME:-}" ]]; then
+    ALERT_SOUND="$HOME/Videos/Alarm/n_alarm.mp3"
+else
+    ALERT_SOUND=""      # no home directory -> no default alert file
+fi
 SINK_NAME="OBS_Alert_Sink"
 STATE_DIR=""                 # empty -> the directory holding this script
 MAX_LOG_BYTES=1048576        # rotate log.txt once it grows past this
 ALERT_PID=0
+
+# How wide the progress bar in the OBS files is (in characters).
+FILE_BAR_WIDTH=20
+
+# How long "Press Enter to continue" waits for a key when the input is not a
+# terminal (a pipe that never closes must not hang the session forever).
+NON_TTY_ENTER_TIMEOUT=300
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -59,6 +72,8 @@ QUOTE_LIST=(
   "A short break now means sharper focus next round"
 )
 
+# The running score and the date of the last state update. They are set
+# before the config file is loaded, so a config file can seed them.
 POINTS=0
 LAST_DATE=""
 
@@ -104,6 +119,7 @@ usage() {
         echo "  q           quit the session"
         echo
         echo "Environment overrides: ALERT_SOUND, SINK_NAME, QUOTES, STATE_DIR, MAX_LOG_BYTES"
+        echo "Config file: --config FILE, \$OBS_PANEL_CONFIG, \$XDG_CONFIG_HOME/obs-study-panel/config"
     } >&2
     exit 1
 }
@@ -137,6 +153,9 @@ Keys (while a phase is running):
   q           quit the session
 
 Environment overrides: ALERT_SOUND, SINK_NAME, QUOTES, STATE_DIR, MAX_LOG_BYTES
+
+Config file (first one that exists):
+  --config FILE | \$OBS_PANEL_CONFIG | \$XDG_CONFIG_HOME/obs-study-panel/config
 EOF
 }
 
@@ -184,7 +203,9 @@ fi
 #   2. $OBS_PANEL_CONFIG
 #   3. $XDG_CONFIG_HOME/obs-study-panel/config  (~/.config/... by default)
 #   4. obs-panel.conf next to this script
-# Only the first file that exists is used.
+# A file given with --config is always used, even when it is missing (that
+# is reported as an error); otherwise the first file of the list that exists
+# is used.
 # ---------------------------------------------------------------------------
 find_config_file() {
     if [[ -n "$CONFIG_FILE" ]]; then
@@ -195,7 +216,7 @@ find_config_file() {
         printf '%s\n' "$OBS_PANEL_CONFIG"
         return 0
     fi
-    local xdg="${XDG_CONFIG_HOME:-$HOME/.config}/obs-study-panel/config"
+    local xdg="${XDG_CONFIG_HOME:-${HOME:-}/.config}/obs-study-panel/config"
     if [[ -f "$xdg" ]]; then
         printf '%s\n' "$xdg"
         return 0
@@ -220,11 +241,23 @@ quotes_to_list() {
 
 load_config() {
     local file=$1
-    # shellcheck source=/dev/null
-    if ! source "$file"; then
-        echo "Error: could not load config file: $file" >&2
+    if [[ ! -r "$file" ]]; then
+        echo "Error: config file is not readable: $file" >&2
         exit 1
     fi
+    # Check the syntax up front: bash only reports a syntax error in a sourced
+    # file and then skips the rest of it, which would silently apply half of
+    # the settings.
+    local err
+    if ! err=$(bash -n "$file" 2>&1); then
+        echo "Error: syntax error in config file: $file" >&2
+        [[ -n "$err" ]] && printf '%s\n' "$err" | head -n 3 >&2
+        exit 1
+    fi
+    # The exit status is deliberately ignored: a config file whose last
+    # command returns non-zero is perfectly valid.
+    # shellcheck source=/dev/null
+    source "$file" || true
     CONFIG_LOADED="$file"
 }
 
@@ -251,6 +284,11 @@ fi
 # Sanity check the knobs the config file may have mangled.
 [[ "$MAX_LOG_BYTES" =~ ^[0-9]+$ ]] && (( MAX_LOG_BYTES > 0 )) \
     || MAX_LOG_BYTES=1048576
+[[ "$FILE_BAR_WIDTH" =~ ^[0-9]+$ ]] && (( FILE_BAR_WIDTH > 0 && FILE_BAR_WIDTH <= 200 )) \
+    || FILE_BAR_WIDTH=20
+[[ "$NON_TTY_ENTER_TIMEOUT" =~ ^[0-9]+$ ]] \
+    && (( NON_TTY_ENTER_TIMEOUT > 0 && NON_TTY_ENTER_TIMEOUT <= 3600 )) \
+    || NON_TTY_ENTER_TIMEOUT=300
 
 # ---------------------------------------------------------------------------
 # Paths and runtime state
@@ -269,9 +307,6 @@ MESSAGE_FILE="$STATE_DIR/message.txt"
 NEXT_FILE="$STATE_DIR/next.txt"
 OVERLAY_FILE="$STATE_DIR/overlay.txt"
 
-# How wide the progress bar in the OBS files is (in characters).
-FILE_BAR_WIDTH=20
-
 # The state that is mirrored into the OBS files (see publish_state).
 SESSION_TEXT=""
 REMAINING_STR="00:00:00"
@@ -279,9 +314,15 @@ PCT=0
 NEXT_TEXT=""
 MESSAGE_TEXT=""
 
-POINTS=0
-LAST_DATE=""
+# POINTS and LAST_DATE are set before the config file is loaded, so a config
+# file can seed them.
 LAST_DAY=""
+
+# STATE_READY: 1 = the state files exist and can be written.
+# STATE_FINALIZED: 1 = the files already show a final state (see cleanup /
+# on_exit), so they must not be reset any more.
+STATE_READY=0
+STATE_FINALIZED=0
 
 # ---------------------------------------------------------------------------
 # Startup logo
@@ -409,8 +450,8 @@ discard_pending_input() {
 play_alert() {
     (( USE_ALERT )) || return 0
     stop_alert   # never let two alarms overlap
-    if [[ ! -f "$ALERT_SOUND" ]]; then
-        echo "${DIM}(alert file not found: $ALERT_SOUND)${NC}"
+    if [[ -z "$ALERT_SOUND" || ! -f "$ALERT_SOUND" ]]; then
+        echo "${DIM}(alert file not found: ${ALERT_SOUND:-none})${NC}"
         return 0
     fi
 
@@ -492,7 +533,18 @@ wait_for_enter() {
             update_date_day
         done
     fi
-    IFS= read -r line || true
+    # Not a terminal: the input may be a pipe that never sends anything and
+    # never closes, so the wait has to be bounded or the session would hang
+    # forever. A line that arrives is used right away.
+    local waited=0
+    while (( waited < NON_TTY_ENTER_TIMEOUT )); do
+        IFS= read -r -t 5 line
+        rc=$?
+        (( rc == 0 )) && return 0
+        # rc 1 = EOF: nothing left to read.
+        (( rc < 128 )) && return 0
+        waited=$(( waited + 5 ))
+    done
     return 0
 }
 
@@ -559,7 +611,8 @@ box_row() {
 
 phase_header() {
     # $1 = label, $2 = round, $3 = total, $4 = minutes, $5 = subtitle
-    local label=$1 round=$2 total=$3 minutes=$4 subtitle=${5:0:$(( BOX_INNER - 4 ))}
+    local label=$1 round=$2 total=$3 minutes=$4 subtitle=${5:-}
+    subtitle=${subtitle:0:$(( BOX_INNER - 4 ))}
     local color bar
     if [[ "$label" == "STUDY" ]]; then
         color="$MAGENTA"
@@ -647,7 +700,7 @@ rounds_label() {
 
 run_phase() {
     local type=$1 minutes=$2 round=$3 total_rounds=$4
-    local label subtitle next_phase t
+    local label subtitle next_phase
 
     if [[ "$type" == "study" ]]; then
         label="STUDY"
@@ -720,8 +773,11 @@ run_phase() {
             case "$KEY" in
                 p|P|' ')
                     if (( paused )); then
+                        # *Add* the pause to the total instead of replacing it:
+                        # the countdown has to stay frozen for the sum of every
+                        # pause, not just for the last one.
+                        paused_total=$(( paused_total + SECONDS - pause_at ))
                         paused=0
-                        paused_total=$(( SECONDS - pause_at ))
                         log_event "Resumed: $label $round/$total_rounds"
                     else
                         paused=1
@@ -741,10 +797,9 @@ run_phase() {
             esac
         fi
 
-        if (( paused )); then
-            # Keep growing the paused time so the countdown stays frozen.
-            paused_total=$(( SECONDS - pause_at ))
-        else
+        if (( ! paused )); then
+            # Only recompute the elapsed time while the timer runs: while it
+            # is paused the countdown has to stay frozen where it was.
             elapsed=$(( SECONDS - start - paused_total ))
         fi
     done
@@ -761,8 +816,9 @@ run_phase() {
     update_date_day
     publish_state
     # Final redraw so the bar ends at 100% / 00:00:00 instead of whatever the
-    # last throttled update (up to 5s earlier) happened to show.
-    draw_status "$label" "$round" "$total_rounds" "$total" "$total" "0"
+    # last throttled update (up to 5s earlier) happened to show. A skipped
+    # phase keeps its real progress, so the bar matches the published PCT.
+    draw_status "$label" "$round" "$total_rounds" "$elapsed" "$total" "0"
     printf '\n'
     log_event "End: $label $round/$total_rounds"
 
@@ -779,18 +835,27 @@ run_phase() {
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
-cleanup() {
-    local code=${1:-0}
-    trap '' INT TERM HUP   # ignore repeated signals while shutting down
-    # Kill any in-flight audio so the alert doesn't keep going after exit.
-    stop_alert
-    # Reset the OBS files first: on SIGHUP the terminal is already gone and
-    # printing may fail, but the stream must not keep showing a frozen timer.
+# The OBS files must never keep showing a frozen timer, so they are reset
+# when the script stops - also when it dies unexpectedly.
+
+reset_state_files() {
     SESSION_TEXT="stopped"
     REMAINING_STR="00:00:00"
     PCT=0
     NEXT_TEXT=""
+    update_date_day
     publish_state
+}
+
+cleanup() {
+    local code=${1:-0}
+    trap '' INT TERM HUP   # ignore repeated signals while shutting down
+    STATE_FINALIZED=1
+    # Kill any in-flight audio so the alert doesn't keep going after exit.
+    stop_alert
+    # Reset the OBS files first: on SIGHUP the terminal is already gone and
+    # printing may fail, but the stream must not keep showing a frozen timer.
+    reset_state_files
     log_event "Protocol stopped manually"
     {
         echo
@@ -798,10 +863,25 @@ cleanup() {
     } 2>/dev/null
     exit "$code"
 }
+
+# Runs on every exit, including an unexpected one (a bash error, a killed
+# child, ...). It must not change the exit code of the script.
+on_exit() {
+    local rc=$?
+    (( STATE_READY ))    || return 0
+    (( STATE_FINALIZED )) && return 0
+    STATE_FINALIZED=1
+    stop_alert
+    reset_state_files
+    log_event "Protocol ended unexpectedly (exit $rc)"
+    return 0
+}
+
 # Conventional exit codes: 128 + signal number.
 trap 'cleanup 130' INT
 trap 'cleanup 143' TERM
 trap 'cleanup 129' HUP
+trap on_exit EXIT
 
 # ---------------------------------------------------------------------------
 # Main
@@ -809,6 +889,9 @@ trap 'cleanup 129' HUP
 print_logo
 setup_audio_sink
 update_date_day
+# From here on the state files may be written (and have to be reset if the
+# script dies unexpectedly).
+STATE_READY=1
 log_event "Starting new study protocol: $(rounds_label "$ROUNDS"), $(duration_label "$STUDY_MIN") study, $(duration_label "$BREAK_MIN") break"
 
 echo "${PURPLE}Protocol:${NC} ${BOLD}$(rounds_label "$ROUNDS")${NC}  ${DIM}|${NC}  ${BOLD}$(duration_label "$STUDY_MIN")${NC} study  ${DIM}|${NC}  ${BOLD}$(duration_label "$BREAK_MIN")${NC} break"
@@ -832,6 +915,8 @@ PCT=100
 NEXT_TEXT=""
 update_date_day
 publish_state
+# The files show the final state, so the exit trap must not reset them.
+STATE_FINALIZED=1
 log_event "Protocol complete - total points: $POINTS"
 
 # ---------------------------------------------------------------------------

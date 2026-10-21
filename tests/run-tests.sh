@@ -160,6 +160,34 @@ run_session "$DIR5B" 1 --dry-run --no-alert --no-sink --config "$CFG_EMPTY" 1 1 
 check "an empty quote list does not crash" "0" "$?"
 check "an empty quote list falls back to a default" "Stay focused." "$(cat "$DIR5B/message.txt")"
 
+# A config file whose last command fails is still a valid config file.
+DIR5C="$TMP/state5c"
+CFG_FAIL="$TMP/failing.conf"
+mkdir -p "$DIR5C"
+cat > "$CFG_FAIL" <<EOF
+STATE_DIR="$DIR5C"
+false
+EOF
+run_session "$DIR5C" 1 --dry-run --no-alert --no-sink --config "$CFG_FAIL" 1 1 1
+check "a config file ending in a failed command still loads" "0" "$?"
+check "a config file ending in a failed command is applied" "1" "$(cat "$DIR5C/points.txt")"
+
+# A config file with a syntax error must be reported instead of being applied
+# halfway.
+CFG_BAD="$TMP/broken.conf"
+printf 'STATE_DIR="%s"\nif then\n' "$TMP" > "$CFG_BAD"
+expect_fail "a config file with a syntax error is an error" \
+    --config "$CFG_BAD" --dry-run 1 1 1
+check_contains "a config syntax error is explained" "syntax error" "$(cat "$TMP/stdout")"
+
+# HOME is not always set (cron, containers) - the script must not die on it.
+DIR5D="$TMP/state5d"
+mkdir -p "$DIR5D"
+printf '\n' | env -u HOME STATE_DIR="$DIR5D" \
+    "$OBS" --dry-run --no-alert --no-sink 1 1 1 > "$TMP/stdout" 2>&1
+check "the script runs without HOME" "0" "$?"
+check "the session completes without HOME" "1" "$(cat "$DIR5D/points.txt")"
+
 # ---------------------------------------------------------------------------
 section "Log rotation"
 # ---------------------------------------------------------------------------
@@ -197,6 +225,43 @@ if command -v script >/dev/null 2>&1; then
     check_contains "pause is logged" "Paused: STUDY 1/1"   "$(cat "$DIRP/log.txt")"
     check_contains "resume is logged" "Resumed: STUDY 1/1" "$(cat "$DIRP/log.txt")"
     check "paused phase still scores a point" "1" "$(cat "$DIRP/points.txt")"
+
+    # Two pauses: the countdown must stay frozen for the sum of *both*
+    # pauses, not only for the last one. The remaining time is sampled from
+    # timer.txt while the phase runs: it may never jump by more than a
+    # second, not even over a pause.
+    DIRP2="$TMP/statep2"
+    mkdir -p "$DIRP2"
+    (
+        while [[ ! -s "$DIRP2/timer.txt" ]]; do sleep 0.1; done
+        for (( i=0; i<70; i++ )); do
+            cat "$DIRP2/timer.txt" 2>/dev/null
+            sleep 0.2
+        done
+    ) > "$TMP/samples" 2>/dev/null &
+    SAMPLER=$!
+    pty_run "$DIRP2" "sleep 1; printf 'p'; sleep 4; printf 'p'; sleep 1; printf 'p'; sleep 1; printf 'p'; sleep 6; printf '\n'; sleep 2; printf '\n'" \
+        --dry-run --no-alert --no-sink 1 6 1
+    kill "$SAMPLER" 2>/dev/null
+    wait "$SAMPLER" 2>/dev/null
+    max_jump=0
+    prev=""
+    while IFS= read -r sample; do
+        [[ "$sample" =~ ^[0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] || continue
+        hh=${sample%%:*}; mm=${sample#*:}; mm=${mm%%:*}; ss=${sample##*:}
+        val=$(( 10#$hh * 3600 + 10#$mm * 60 + 10#$ss ))
+        if [[ -n "$prev" ]]; then
+            jump=$(( prev - val ))
+            (( jump < 0 )) && jump=0
+            (( jump > max_jump )) && max_jump=$jump
+        fi
+        prev=$val
+    done < "$TMP/samples"
+    if (( max_jump <= 3 )); then
+        ok "two pauses keep the countdown frozen for both (max jump ${max_jump}s)"
+    else
+        bad "two pauses keep the countdown frozen for both" "the countdown jumped ${max_jump}s"
+    fi
 
     # Skip: the phase ends at once and earns no point.
     DIRS="$TMP/states"
@@ -251,6 +316,50 @@ RC=$?
 check "SIGTERM exits with 143" "143" "$RC"
 check "SIGTERM resets the session file" "stopped" "$(cat "$DIRT/session.txt")"
 check_contains "SIGTERM is logged" "Protocol stopped manually" "$(cat "$DIRT/log.txt")"
+
+# ---------------------------------------------------------------------------
+section "Unexpected death"
+# ---------------------------------------------------------------------------
+# A script that dies without a signal (a bash error, an OOM kill, ...) must
+# not leave a frozen timer on the stream. The crash is simulated with a copy
+# of the script that exits in the middle of a phase.
+DIRX="$TMP/statex"
+mkdir -p "$DIRX"
+sed 's|wait_key 1|exit 42|' "$OBS" > "$TMP/OBS.crash.sh"
+chmod +x "$TMP/OBS.crash.sh"
+printf '\n' | STATE_DIR="$DIRX" timeout 30 "$TMP/OBS.crash.sh" \
+    --dry-run --no-alert --no-sink 1 30 1 > "$TMP/stdout" 2>&1
+check "an unexpected death keeps the exit code" "42" "$?"
+check "an unexpected death resets the session file" "stopped" "$(cat "$DIRX/session.txt")"
+check "an unexpected death zeroes the timer file" "00:00:00" "$(cat "$DIRX/timer.txt")"
+check_contains "an unexpected death is logged" "Protocol ended unexpectedly" "$(cat "$DIRX/log.txt")"
+
+# ---------------------------------------------------------------------------
+section "Non-interactive input"
+# ---------------------------------------------------------------------------
+# "Press Enter to continue" must not block forever when the input is a pipe
+# that never sends a line and never closes.
+DIRW="$TMP/statew"
+CFG_W="$TMP/wait.conf"
+mkdir -p "$DIRW"
+cat > "$CFG_W" <<EOF
+STATE_DIR="$DIRW"
+NON_TTY_ENTER_TIMEOUT=5
+EOF
+mkfifo "$TMP/hold.fifo"
+exec 9<> "$TMP/hold.fifo"
+START=$(date +%s)
+STATE_DIR="$DIRW" timeout 30 "$OBS" --dry-run --no-alert --no-sink \
+    --config "$CFG_W" 1 1 1 < "$TMP/hold.fifo" > "$TMP/stdout" 2>&1
+RC=$?
+END=$(date +%s)
+exec 9>&-
+check "a pipe that never sends anything does not hang the script" "0" "$RC"
+if (( END - START <= 20 )); then
+    ok "the wait for Enter is bounded ($((END - START))s)"
+else
+    bad "the wait for Enter is bounded" "took $((END - START))s"
+fi
 
 # ---------------------------------------------------------------------------
 printf '\n\033[1;35m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
