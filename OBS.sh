@@ -268,8 +268,12 @@ update_date_day() {
 }
 
 write_session() {
-    # $1 = phase label, $2 = round, $3 = total rounds
-    printf '%s %d/%d\n' "$1" "$2" "$3" > "$SESSION_FILE"
+    # $1 = phase label, $2 = round, $3 = total rounds, $4 = optional suffix
+    if [[ -n "${4:-}" ]]; then
+        printf '%s %d/%d %s\n' "$1" "$2" "$3" "$4" > "$SESSION_FILE"
+    else
+        printf '%s %d/%d\n' "$1" "$2" "$3" > "$SESSION_FILE"
+    fi
 }
 
 log_event() {
@@ -355,15 +359,51 @@ play_alert() {
 }
 
 # ---------------------------------------------------------------------------
+# Keyboard input
+#
+# The countdown polls for a single keypress instead of just sleeping, so a
+# phase can be paused, skipped or aborted without killing the session.
+# ---------------------------------------------------------------------------
+KEY=""
+KEY_READ=0
+
+# wait_key <timeout>: wait up to <timeout> seconds for one keypress.
+# Sets KEY to the character (empty for Enter) and KEY_READ to 1 when a key
+# was actually read, 0 on timeout.
+wait_key() {
+    local timeout=${1:-1}
+    KEY=""
+    KEY_READ=0
+    if [[ -t 0 ]]; then
+        # rc 0 = a key was read, rc 142 = timeout.
+        if IFS= read -rsn1 -t "$timeout" KEY; then
+            KEY_READ=1
+        fi
+    else
+        # Nothing to read from (piped input, cron, ...): just wait it out.
+        sleep "$timeout"
+    fi
+    return 0
+}
+
+# wait_for_enter: block until the user presses Enter.
+wait_for_enter() {
+    local line=""
+    IFS= read -r line || true
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Status / progress UI
 # ---------------------------------------------------------------------------
 draw_status() {
-    local label=$1 round=$2 total_rounds=$3 elapsed=$4 total=$5 remaining_str=$6
+    local label=$1 round=$2 total_rounds=$3 elapsed=$4 total=$5 paused=$6 remaining_str=$7
     local width=24
     local filled=0
     if (( total > 0 )); then
         filled=$(( elapsed * width / total ))
     fi
+    (( filled > width )) && filled=$width
     local i bar=""
     for (( i=0; i<width; i++ )); do
         if (( i < filled )); then
@@ -387,13 +427,18 @@ draw_status() {
         color="$PURPLE"
     fi
 
+    local flag=""
+    if (( paused )); then
+        flag="${MAGENTA} PAUSED${NC}"
+    fi
+
     printf '\r\033[K'
-    printf '%s%s%-6s%s [%d/%d] %s[%s]%s %3d%%  %s  %sPts:%d%s' \
+    printf '%s%s%-6s%s [%d/%d] %s[%s]%s %3d%%  %s  %sPts:%d%s%s' \
         "$BOLD" "$color" "$label" "$NC" \
         "$round" "$total_rounds" \
         "$color" "$bar" "$NC" \
         "$pct" "$remaining_str" \
-        "$MAGENTA" "$POINTS" "$NC"
+        "$MAGENTA" "$POINTS" "$NC" "$flag"
 }
 
 BOX_INNER=62
@@ -426,19 +471,26 @@ phase_header() {
     box_row "$color" "  ${info}" \
         "  ${BOLD}${label}${NC}${color}  ·  Round ${round} / ${total}  ·  ${minutes} min"
     box_row "$color" "  ${subtitle}" "  ${DIM}${subtitle}${NC}${color}"
+    if [[ -t 0 ]]; then
+        box_row "$color" "  p pause  ·  s skip  ·  q quit" \
+            "  ${DIM}p pause  ·  s skip  ·  q quit${NC}${color}"
+    fi
     echo "${color}╚${bar}╝${NC}"
     echo
 }
 
 show_completion() {
-    # $1 = phase label, $2 = round, $3 = total rounds, $4 = next phase description
-    local phase=$1 round=$2 total_rounds=$3 next_phase=$4
+    # $1 = phase label, $2 = round, $3 = total rounds, $4 = next phase
+    # description, $5 = "skipped" when the phase was cut short
+    local phase=$1 round=$2 total_rounds=$3 next_phase=$4 skipped=${5:-0}
     local width=60
     local line
     line=$(printf '=%.0s' $(seq 1 $width))
 
     local title
-    if [[ "$phase" == "STUDY" ]]; then
+    if [[ "$skipped" == "1" ]]; then
+        title="PHASE SKIPPED"
+    elif [[ "$phase" == "STUDY" ]]; then
         title="STUDY SESSION COMPLETE"
     else
         title="BREAK COMPLETE"
@@ -491,7 +543,10 @@ run_phase() {
     # Count against the shell's wall-clock ($SECONDS) instead of adding 1 per
     # loop: each iteration costs a bit more than 1s (file writes, redraw), so
     # a naive counter makes a 50 min phase run noticeably longer.
-    local start=$SECONDS
+    # `paused_total` holds the seconds spent paused, so the countdown freezes
+    # while the phase is paused and resumes exactly where it left off.
+    local start=$SECONDS paused_total=0 pause_at=0
+    local paused=0 skipped=0
 
     write_session "$label" "$round" "$total_rounds"
     log_event "Start: $label $round/$total_rounds ($minutes min)"
@@ -502,24 +557,62 @@ run_phase() {
         printf -v t '%02d:%02d:%02d' \
             $((remaining/3600)) $((remaining%3600/60)) $((remaining%60))
         printf '%s\n' "$t" > "$TIMER_FILE"
+        if (( paused )); then
+            write_session "$label" "$round" "$total_rounds" "(PAUSED)"
+        fi
         update_date_day
 
         # Redraw every tick so the terminal countdown matches timer.txt. This
         # is pure bash builtins (no forks), so it costs next to nothing.
-        draw_status "$label" "$round" "$total_rounds" "$elapsed" "$total" "$t"
+        draw_status "$label" "$round" "$total_rounds" "$elapsed" "$total" "$paused" "$t"
 
-        sleep 1
-        elapsed=$(( SECONDS - start ))
+        wait_key 1
+        if (( KEY_READ )); then
+            case "$KEY" in
+                p|P|' ')
+                    if (( paused )); then
+                        paused=0
+                        paused_total=$(( SECONDS - pause_at ))
+                        log_event "Resumed: $label $round/$total_rounds"
+                    else
+                        paused=1
+                        pause_at=$SECONDS
+                        log_event "Paused: $label $round/$total_rounds"
+                    fi
+                    ;;
+                s|S)
+                    skipped=1
+                    log_event "Skipped: $label $round/$total_rounds"
+                    break
+                    ;;
+                q|Q)
+                    log_event "Quit requested by user"
+                    cleanup 0
+                    ;;
+            esac
+        fi
+
+        if (( paused )); then
+            # Keep growing the paused time so the countdown stays frozen.
+            paused_total=$(( SECONDS - pause_at ))
+        else
+            elapsed=$(( SECONDS - start - paused_total ))
+        fi
     done
 
     echo "00:00:00" > "$TIMER_FILE"
     # Final redraw so the bar ends at 100% / 00:00:00 instead of whatever the
     # last throttled update (up to 5s earlier) happened to show.
-    draw_status "$label" "$round" "$total_rounds" "$total" "$total" "00:00:00"
+    draw_status "$label" "$round" "$total_rounds" "$total" "$total" "0" "00:00:00"
     printf '\n'
     log_event "End: $label $round/$total_rounds"
 
-    POINTS=$(( POINTS + 1 ))
+    if (( skipped )); then
+        # A skipped phase doesn't earn a point.
+        write_session "$label" "$round" "$total_rounds" "(SKIPPED)"
+    else
+        POINTS=$(( POINTS + 1 ))
+    fi
     play_alert
 
     if [[ "$type" == "study" ]]; then
@@ -533,9 +626,9 @@ run_phase() {
     fi
 
     discard_pending_input
-    show_completion "$label" "$round" "$total_rounds" "$next_phase"
+    show_completion "$label" "$round" "$total_rounds" "$next_phase" "$skipped"
     # Block until user is ready. No input besides Enter needed.
-    read -r _
+    wait_for_enter
     stop_alert   # silence the alarm once the user has acknowledged it
     echo
 }
