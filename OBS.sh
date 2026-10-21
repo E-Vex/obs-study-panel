@@ -4,7 +4,7 @@
 # Writes live state to 5 text files (date.txt, day.txt, session.txt,
 # timer.txt, log.txt) for use as Text sources in OBS Studio.
 #
-# Usage:   ./OBS.sh <rounds> <study_minutes> <break_minutes>
+# Usage:   ./OBS.sh [options] <rounds> <study_minutes> <break_minutes>
 # Example: ./OBS.sh 5 50 10   ->  5 rounds, 50 min study, 10 min break
 # Stop:    Ctrl+C
 
@@ -20,19 +20,112 @@ DIM=$'\e[2m'
 NC=$'\e[0m'
 
 # ---------------------------------------------------------------------------
+# Environment overrides
+#
+# These are captured *first*: before the built-in defaults are applied and
+# before the config file is sourced. Otherwise the defaults would clobber the
+# environment, and the config file (which is shell code) would clobber the
+# environment as well. The captured values are re-applied after the config
+# file has been loaded, so the environment always wins over the config file.
+# ---------------------------------------------------------------------------
+ENV_ALERT_SOUND="${ALERT_SOUND:-}"
+ENV_SINK_NAME="${SINK_NAME:-}"
+ENV_STATE_DIR="${STATE_DIR:-}"
+ENV_MAX_LOG_BYTES="${MAX_LOG_BYTES:-}"
+ENV_QUOTES="${QUOTES:-}"
+
+# ---------------------------------------------------------------------------
+# Built-in defaults
+#
+# Every one of these can be overridden by the config file or by an
+# environment variable (see load_config). Precedence, lowest to highest:
+#   built-in default  <  config file  <  environment variable  <  CLI flag
+# ---------------------------------------------------------------------------
+ALERT_SOUND="$HOME/Videos/Alarm/n_alarm.mp3"
+SINK_NAME="OBS_Alert_Sink"
+STATE_DIR=""                 # empty -> the directory holding this script
+MAX_LOG_BYTES=1048576        # rotate log.txt once it grows past this
+ALERT_PID=0
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+QUOTE_LIST=(
+  "Focused effort beats scattered hours"
+  "Every round finished is progress made"
+  "Consistency beats intensity"
+  "Start now, figure out the rest along the way"
+  "A short break now means sharper focus next round"
+)
+
+POINTS=0
+LAST_DATE=""
+
+# ---------------------------------------------------------------------------
 # Argument parsing & validation
 # ---------------------------------------------------------------------------
+CONFIG_FILE=""
+USE_ALERT=1
+USE_SINK=1
+ROUNDS=""
+STUDY_MIN=""
+BREAK_MIN=""
+
 usage() {
     {
-        echo "Usage: $0 <rounds> <study_minutes> <break_minutes>"
+        echo "Usage: $0 [options] <rounds> <study_minutes> <break_minutes>"
+        echo
+        echo "Options:"
+        echo "  -h, --help          Show this help and exit"
+        echo "  -c, --config FILE   Load settings from FILE (bash syntax)"
+        echo "  -n, --no-alert      Disable the audio alert"
+        echo "  -s, --no-sink       Don't create or use the OBS virtual audio sink"
+        echo
         echo "Example: $0 5 50 10"
-        echo "Limits:  rounds 1-50, study 1-600 min, break 1-120 min"
+        echo "Example: $0 --config ~/obs-panel.conf 5 50 10"
+        echo
+        echo "Environment overrides: ALERT_SOUND, SINK_NAME, QUOTES, STATE_DIR, MAX_LOG_BYTES"
     } >&2
     exit 1
 }
 
-[ $# -eq 3 ] || usage
+print_help() {
+    cat <<EOF
+Usage: $(basename "$0") [options] <rounds> <study_minutes> <break_minutes>
 
+Runs a Pomodoro-style study/break loop and writes the live state to text
+files that OBS Studio can display as "Text (read from file)" sources.
+
+Options:
+  -h, --help          Show this help and exit
+  -c, --config FILE   Load settings from FILE (bash syntax)
+  -n, --no-alert      Disable the audio alert
+  -s, --no-sink       Don't create or use the OBS virtual audio sink
+
+Arguments:
+  rounds             1-50   number of study rounds
+  study_minutes      1-600  length of a study phase
+  break_minutes      1-120  length of a break phase
+
+Example: $(basename "$0") 5 50 10
+
+Environment overrides: ALERT_SOUND, SINK_NAME, QUOTES, STATE_DIR, MAX_LOG_BYTES
+EOF
+}
+
+while (( $# )); do
+    case "$1" in
+        -h|--help)      print_help; exit 0 ;;
+        -c|--config)    [[ $# -ge 2 ]] || { echo "Error: $1 needs a file argument" >&2; usage; }
+                        CONFIG_FILE=$2; shift 2 ;;
+        -n|--no-alert)  USE_ALERT=0; shift ;;
+        -s|--no-sink)   USE_SINK=0; shift ;;
+        --)             shift; break ;;
+        -*)             echo "Error: unknown option: $1" >&2; usage ;;
+        *)              break ;;
+    esac
+done
+
+[ $# -eq 3 ] || usage
 ROUNDS=$1
 STUDY_MIN=$2
 BREAK_MIN=$3
@@ -49,29 +142,93 @@ done
 (( BREAK_MIN <= 120 )) || { echo "Error: break minutes must be <= 120" >&2; usage; }
 
 # ---------------------------------------------------------------------------
+# Configuration file
+#
+# The file is sourced, so it is ordinary bash and can set any of the knobs
+# below. It is looked up in this order:
+#   1. --config FILE
+#   2. $OBS_PANEL_CONFIG
+#   3. $XDG_CONFIG_HOME/obs-study-panel/config  (~/.config/... by default)
+#   4. obs-panel.conf next to this script
+# Only the first file that exists is used.
+# ---------------------------------------------------------------------------
+find_config_file() {
+    if [[ -n "$CONFIG_FILE" ]]; then
+        printf '%s\n' "$CONFIG_FILE"
+        return 0
+    fi
+    if [[ -n "${OBS_PANEL_CONFIG:-}" ]]; then
+        printf '%s\n' "$OBS_PANEL_CONFIG"
+        return 0
+    fi
+    local xdg="${XDG_CONFIG_HOME:-$HOME/.config}/obs-study-panel/config"
+    if [[ -f "$xdg" ]]; then
+        printf '%s\n' "$xdg"
+        return 0
+    fi
+    local local_cfg="$DIR/obs-panel.conf"
+    if [[ -f "$local_cfg" ]]; then
+        printf '%s\n' "$local_cfg"
+        return 0
+    fi
+    return 1
+}
+
+# Turn a newline separated string into the QUOTE_LIST array.
+quotes_to_list() {
+    local raw=$1 line
+    QUOTE_LIST=()
+    while IFS= read -r line; do
+        line=${line%$'\r'}
+        [[ -n "$line" ]] && QUOTE_LIST+=("$line")
+    done <<< "$raw"
+}
+
+load_config() {
+    local file=$1
+    # shellcheck source=/dev/null
+    if ! source "$file"; then
+        echo "Error: could not load config file: $file" >&2
+        exit 1
+    fi
+    CONFIG_LOADED="$file"
+}
+
+CONFIG_LOADED=""
+if cfg="$(find_config_file)"; then
+    load_config "$cfg"
+fi
+
+# Environment variables beat the config file.
+[[ -n "$ENV_ALERT_SOUND" ]]   && ALERT_SOUND="$ENV_ALERT_SOUND"
+[[ -n "$ENV_SINK_NAME" ]]     && SINK_NAME="$ENV_SINK_NAME"
+[[ -n "$ENV_STATE_DIR" ]]     && STATE_DIR="$ENV_STATE_DIR"
+[[ -n "$ENV_MAX_LOG_BYTES" ]] && MAX_LOG_BYTES="$ENV_MAX_LOG_BYTES"
+
+# QUOTES: a newline separated string, either from the environment or from the
+# config file. The config file may also set QUOTE_LIST=(...) directly.
+if [[ -n "$ENV_QUOTES" ]]; then
+    quotes_to_list "$ENV_QUOTES"
+elif [[ -n "${QUOTES:-}" ]]; then
+    quotes_to_list "$QUOTES"
+    unset QUOTES
+fi
+
+# Sanity check the knobs the config file may have mangled.
+[[ "$MAX_LOG_BYTES" =~ ^[0-9]+$ ]] && (( MAX_LOG_BYTES > 0 )) \
+    || MAX_LOG_BYTES=1048576
+
+# ---------------------------------------------------------------------------
 # Paths and runtime state
 # ---------------------------------------------------------------------------
-ALERT_SOUND="$HOME/Videos/Alarm/n_alarm.mp3"
-SINK_NAME="OBS_Alert_Sink"
-ALERT_PID=0
+STATE_DIR="${STATE_DIR:-$DIR}"
+mkdir -p "$STATE_DIR" || { echo "Error: cannot create state dir: $STATE_DIR" >&2; exit 1; }
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATE_FILE="$DIR/date.txt"
-DAY_FILE="$DIR/day.txt"
-SESSION_FILE="$DIR/session.txt"
-TIMER_FILE="$DIR/timer.txt"
-LOG_FILE="$DIR/log.txt"
-
-QUOTES=(
-  "Focused effort beats scattered hours"
-  "Every round finished is progress made"
-  "Consistency beats intensity"
-  "Start now, figure out the rest along the way"
-  "A short break now means sharper focus next round"
-)
-
-POINTS=0
-LAST_DATE=""
+DATE_FILE="$STATE_DIR/date.txt"
+DAY_FILE="$STATE_DIR/day.txt"
+SESSION_FILE="$STATE_DIR/session.txt"
+TIMER_FILE="$STATE_DIR/timer.txt"
+LOG_FILE="$STATE_DIR/log.txt"
 
 # ---------------------------------------------------------------------------
 # Startup logo
@@ -132,6 +289,7 @@ sink_is_ready() {
 }
 
 setup_audio_sink() {
+    (( USE_SINK )) || return 0
     command -v pactl &>/dev/null || return 0
     sink_is_ready && return 0
     pactl load-module module-null-sink sink_name="$SINK_NAME" \
@@ -154,6 +312,7 @@ discard_pending_input() {
 }
 
 play_alert() {
+    (( USE_ALERT )) || return 0
     stop_alert   # never let two alarms overlap
     if [[ ! -f "$ALERT_SOUND" ]]; then
         echo "${DIM}(alert file not found: $ALERT_SOUND)${NC}"
@@ -176,11 +335,11 @@ play_alert() {
     # Self-heal the OBS sink: recreate it if it vanished since startup
     # (e.g. PulseAudio was restarted). Without this, sink_is_ready fails and
     # we fall back to the default output, which OBS can't capture.
-    if ! sink_is_ready; then
+    if (( USE_SINK )) && ! sink_is_ready; then
         setup_audio_sink
     fi
 
-    if sink_is_ready; then
+    if (( USE_SINK )) && sink_is_ready; then
         # PULSE_SINK routes any PulseAudio client through our virtual sink,
         # so OBS captures the alert independently of the user's mic. This is
         # far more portable than mpv's --audio-device flag, whose format has
@@ -322,7 +481,7 @@ run_phase() {
 
     if [[ "$type" == "study" ]]; then
         label="STUDY"
-        subtitle="${QUOTES[$(( RANDOM % ${#QUOTES[@]} ))]}"
+        subtitle="${QUOTE_LIST[$(( RANDOM % ${#QUOTE_LIST[@]} ))]}"
     else
         label="BREAK"
         subtitle="Relax and recharge."
@@ -414,6 +573,9 @@ update_date_day
 log_event "Starting new study protocol: $ROUNDS rounds, $STUDY_MIN min study, $BREAK_MIN min break"
 
 echo "${PURPLE}Protocol:${NC} ${BOLD}${ROUNDS}${NC} rounds  ${DIM}|${NC}  ${BOLD}${STUDY_MIN}${NC} min study  ${DIM}|${NC}  ${BOLD}${BREAK_MIN}${NC} min break"
+if [[ -n "$CONFIG_LOADED" ]]; then
+    echo "${DIM}Config: $CONFIG_LOADED${NC}"
+fi
 echo
 
 for (( round=1; round<=ROUNDS; round++ )); do
