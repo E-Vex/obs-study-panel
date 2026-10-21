@@ -2,3 +2,5 @@
 !.gitignore
 !OBS.sh
 !README.md
+!tests/
+!tests/**
