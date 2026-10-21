@@ -337,7 +337,20 @@ publish_state() {
     } > "$OVERLAY_FILE"
 }
 
+# Keep log.txt from growing without bound: when it passes MAX_LOG_BYTES the
+# previous version is moved aside and a fresh one is started.
+rotate_log_if_needed() {
+    [[ -f "$LOG_FILE" ]] || return 0
+    local size
+    size=$(wc -c < "$LOG_FILE" 2>/dev/null) || return 0
+    [[ "$size" =~ ^[0-9]+$ ]] || return 0
+    (( size < MAX_LOG_BYTES )) && return 0
+    mv -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || return 0
+    : > "$LOG_FILE"
+}
+
 log_event() {
+    rotate_log_if_needed
     printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG_FILE"
 }
 
@@ -448,8 +461,20 @@ wait_key() {
 }
 
 # wait_for_enter: block until the user presses Enter.
+# The read is done with a 1s timeout so the date can roll over at midnight
+# while we sit here waiting.
 wait_for_enter() {
-    local line=""
+    local line="" rc=0
+    if [[ -t 0 ]]; then
+        while true; do
+            IFS= read -r -t 1 line
+            rc=$?
+            (( rc == 0 )) && return 0
+            # rc 1 = EOF: stdin is gone, nothing left to wait for.
+            (( rc < 128 )) && return 0
+            update_date_day
+        done
+    fi
     IFS= read -r line || true
     return 0
 }
