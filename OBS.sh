@@ -229,6 +229,25 @@ DAY_FILE="$STATE_DIR/day.txt"
 SESSION_FILE="$STATE_DIR/session.txt"
 TIMER_FILE="$STATE_DIR/timer.txt"
 LOG_FILE="$STATE_DIR/log.txt"
+PROGRESS_FILE="$STATE_DIR/progress.txt"
+POINTS_FILE="$STATE_DIR/points.txt"
+MESSAGE_FILE="$STATE_DIR/message.txt"
+NEXT_FILE="$STATE_DIR/next.txt"
+OVERLAY_FILE="$STATE_DIR/overlay.txt"
+
+# How wide the progress bar in the OBS files is (in characters).
+FILE_BAR_WIDTH=20
+
+# The state that is mirrored into the OBS files (see publish_state).
+SESSION_TEXT=""
+REMAINING_STR="00:00:00"
+PCT=0
+NEXT_TEXT=""
+MESSAGE_TEXT=""
+
+POINTS=0
+LAST_DATE=""
+LAST_DAY=""
 
 # ---------------------------------------------------------------------------
 # Startup logo
@@ -263,17 +282,42 @@ update_date_day() {
     [[ "$d" == "$LAST_DATE" ]] && return 0
     LAST_DATE=$d
     printf -v dow '%(%A)T' -1
+    LAST_DAY=$dow
     printf '%s\n' "$d"   > "$DATE_FILE"
     printf '%s\n' "$dow" > "$DAY_FILE"
 }
 
-write_session() {
-    # $1 = phase label, $2 = round, $3 = total rounds, $4 = optional suffix
-    if [[ -n "${4:-}" ]]; then
-        printf '%s %d/%d %s\n' "$1" "$2" "$3" "$4" > "$SESSION_FILE"
-    else
-        printf '%s %d/%d\n' "$1" "$2" "$3" > "$SESSION_FILE"
-    fi
+# publish_state: write every OBS file from the current state variables.
+# Only bash builtins, no forks - this runs once per second.
+publish_state() {
+    printf '%s\n' "$SESSION_TEXT"  > "$SESSION_FILE"
+    printf '%s\n' "$REMAINING_STR" > "$TIMER_FILE"
+    printf '%s\n' "$POINTS"        > "$POINTS_FILE"
+    printf '%s\n' "$NEXT_TEXT"     > "$NEXT_FILE"
+    printf '%s\n' "$MESSAGE_TEXT"  > "$MESSAGE_FILE"
+
+    local i bar=""
+    for (( i=0; i<FILE_BAR_WIDTH; i++ )); do
+        if (( i < PCT * FILE_BAR_WIDTH / 100 )); then
+            bar+="#"
+        else
+            bar+="-"
+        fi
+    done
+    printf '[%s] %3d%%\n' "$bar" "$PCT" > "$PROGRESS_FILE"
+
+    # One-file overlay for people who want a single OBS text source.
+    {
+        printf '%s  %s\n' "$LAST_DATE" "$LAST_DAY"
+        printf '%s\n' "$SESSION_TEXT"
+        printf '%s\n' "$REMAINING_STR"
+        printf '[%s] %3d%%\n' "$bar" "$PCT"
+        printf 'Pts: %d\n' "$POINTS"
+        printf 'Next: %s\n' "$NEXT_TEXT"
+        if [[ -n "$MESSAGE_TEXT" ]]; then
+            printf '%s\n' "$MESSAGE_TEXT"
+        fi
+    } > "$OVERLAY_FILE"
 }
 
 log_event() {
@@ -397,7 +441,7 @@ wait_for_enter() {
 # Status / progress UI
 # ---------------------------------------------------------------------------
 draw_status() {
-    local label=$1 round=$2 total_rounds=$3 elapsed=$4 total=$5 paused=$6 remaining_str=$7
+    local label=$1 round=$2 total_rounds=$3 elapsed=$4 total=$5 paused=$6
     local width=24
     local filled=0
     if (( total > 0 )); then
@@ -437,7 +481,7 @@ draw_status() {
         "$BOLD" "$color" "$label" "$NC" \
         "$round" "$total_rounds" \
         "$color" "$bar" "$NC" \
-        "$pct" "$remaining_str" \
+        "$pct" "$REMAINING_STR" \
         "$MAGENTA" "$POINTS" "$NC" "$flag"
 }
 
@@ -539,6 +583,17 @@ run_phase() {
         subtitle="Relax and recharge."
     fi
 
+    # What comes after this phase, shown live in next.txt / overlay.txt.
+    if [[ "$type" == "study" ]]; then
+        if (( round < total_rounds )); then
+            next_phase="Break ($(minutes_label "$BREAK_MIN"))"
+        else
+            next_phase="None"
+        fi
+    else
+        next_phase="Study ($(minutes_label "$STUDY_MIN"))"
+    fi
+
     local total=$(( minutes * 60 )) elapsed=0
     # Count against the shell's wall-clock ($SECONDS) instead of adding 1 per
     # loop: each iteration costs a bit more than 1s (file writes, redraw), so
@@ -548,23 +603,38 @@ run_phase() {
     local start=$SECONDS paused_total=0 pause_at=0
     local paused=0 skipped=0
 
-    write_session "$label" "$round" "$total_rounds"
+    SESSION_TEXT="$label $round/$total_rounds"
+    printf -v REMAINING_STR '%02d:%02d:%02d' \
+        $((total/3600)) $((total%3600/60)) $((total%60))
+    PCT=0
+    NEXT_TEXT="$next_phase"
+    # "None" is the internal marker for "no phase follows"; on the stream
+    # that reads better as a finished session.
+    [[ "$NEXT_TEXT" == "None" ]] && NEXT_TEXT="Session complete"
+    MESSAGE_TEXT="$subtitle"
+
     log_event "Start: $label $round/$total_rounds ($minutes min)"
     phase_header "$label" "$round" "$total_rounds" "$minutes" "$subtitle"
+    update_date_day
+    publish_state
 
     while (( elapsed < total )); do
         local remaining=$(( total - elapsed ))
-        printf -v t '%02d:%02d:%02d' \
+        (( remaining < 0 )) && remaining=0
+        printf -v REMAINING_STR '%02d:%02d:%02d' \
             $((remaining/3600)) $((remaining%3600/60)) $((remaining%60))
-        printf '%s\n' "$t" > "$TIMER_FILE"
-        if (( paused )); then
-            write_session "$label" "$round" "$total_rounds" "(PAUSED)"
-        fi
+        PCT=0
+        (( total > 0 )) && PCT=$(( elapsed * 100 / total ))
+        (( PCT > 100 )) && PCT=100
+        SESSION_TEXT="$label $round/$total_rounds"
+        (( paused )) && SESSION_TEXT="$SESSION_TEXT (PAUSED)"
+
         update_date_day
+        publish_state
 
         # Redraw every tick so the terminal countdown matches timer.txt. This
         # is pure bash builtins (no forks), so it costs next to nothing.
-        draw_status "$label" "$round" "$total_rounds" "$elapsed" "$total" "$paused" "$t"
+        draw_status "$label" "$round" "$total_rounds" "$elapsed" "$total" "$paused"
 
         wait_key 1
         if (( KEY_READ )); then
@@ -600,30 +670,24 @@ run_phase() {
         fi
     done
 
-    echo "00:00:00" > "$TIMER_FILE"
+    # Phase is over (finished, or skipped).
+    if (( skipped )); then
+        # A skipped phase doesn't earn a point.
+        SESSION_TEXT="$label $round/$total_rounds (SKIPPED)"
+    else
+        PCT=100
+        POINTS=$(( POINTS + 1 ))
+    fi
+    REMAINING_STR="00:00:00"
+    update_date_day
+    publish_state
     # Final redraw so the bar ends at 100% / 00:00:00 instead of whatever the
     # last throttled update (up to 5s earlier) happened to show.
-    draw_status "$label" "$round" "$total_rounds" "$total" "$total" "0" "00:00:00"
+    draw_status "$label" "$round" "$total_rounds" "$total" "$total" "0"
     printf '\n'
     log_event "End: $label $round/$total_rounds"
 
-    if (( skipped )); then
-        # A skipped phase doesn't earn a point.
-        write_session "$label" "$round" "$total_rounds" "(SKIPPED)"
-    else
-        POINTS=$(( POINTS + 1 ))
-    fi
     play_alert
-
-    if [[ "$type" == "study" ]]; then
-        if (( round < total_rounds )); then
-            next_phase="Break ($(minutes_label "$BREAK_MIN"))"
-        else
-            next_phase="None"
-        fi
-    else
-        next_phase="Study ($(minutes_label "$STUDY_MIN"))"
-    fi
 
     discard_pending_input
     show_completion "$label" "$round" "$total_rounds" "$next_phase" "$skipped"
@@ -643,8 +707,11 @@ cleanup() {
     stop_alert
     # Reset the OBS files first: on SIGHUP the terminal is already gone and
     # printing may fail, but the stream must not keep showing a frozen timer.
-    echo "stopped"     > "$SESSION_FILE"
-    echo "00:00:00"    > "$TIMER_FILE"
+    SESSION_TEXT="stopped"
+    REMAINING_STR="00:00:00"
+    PCT=0
+    NEXT_TEXT=""
+    publish_state
     log_event "Protocol stopped manually"
     {
         echo
@@ -680,8 +747,12 @@ for (( round=1; round<=ROUNDS; round++ )); do
 done
 
 # Final OBS state: mark as complete.
-echo "session complete" > "$SESSION_FILE"
-echo "00:00:00"          > "$TIMER_FILE"
+SESSION_TEXT="session complete"
+REMAINING_STR="00:00:00"
+PCT=100
+NEXT_TEXT=""
+update_date_day
+publish_state
 log_event "Protocol complete - total points: $POINTS"
 
 # ---------------------------------------------------------------------------
