@@ -189,6 +189,75 @@ check "the script runs without HOME" "0" "$?"
 check "the session completes without HOME" "1" "$(cat "$DIR5D/points.txt")"
 
 # ---------------------------------------------------------------------------
+section "Color themes"
+# ---------------------------------------------------------------------------
+"$OBS" --list-themes > "$TMP/themes" 2>&1
+check "--list-themes exits 0" "0" "$?"
+THEME_COUNT=$(grep -cE '^  [A-Za-z]+ ' "$TMP/themes")
+if (( THEME_COUNT >= 10 )); then
+    ok "at least 10 themes are available ($THEME_COUNT)"
+else
+    bad "at least 10 themes are available" "only $THEME_COUNT themes"
+fi
+check_contains "--list-themes names the themes" "Purple" "$(cat "$TMP/themes")"
+check_contains "--list-themes names the themes" "Ocean"  "$(cat "$TMP/themes")"
+
+# theme_of <file>: the theme a run used (the startup line names it).
+theme_of() {
+    sed -e 's/\x1b\[[0-9;]*m//g' "$1" \
+        | grep -oE 'Theme: [A-Za-z]+' | head -1 | cut -d' ' -f2
+}
+
+# The command line picks the theme.
+DIRT1="$TMP/themet1"
+mkdir -p "$DIRT1"
+run_session "$DIRT1" 1 --dry-run --no-alert --no-sink --theme Ocean 1 1 1
+check "--theme picks the theme" "Ocean" "$(theme_of "$TMP/stdout")"
+
+# The environment variable picks the theme.
+DIRT2="$TMP/themet2"
+mkdir -p "$DIRT2"
+printf '\n' | THEME=Forest STATE_DIR="$DIRT2" timeout 60 "$OBS" \
+    --dry-run --no-alert --no-sink 1 1 1 > "$TMP/stdout" 2>&1
+check "the THEME environment variable picks the theme" "Forest" "$(theme_of "$TMP/stdout")"
+
+# The command line beats the environment variable.
+printf '\n' | THEME=Forest STATE_DIR="$DIRT2" timeout 60 "$OBS" \
+    --dry-run --no-alert --no-sink --theme Ice 1 1 1 > "$TMP/stdout" 2>&1
+check "--theme beats the environment variable" "Ice" "$(theme_of "$TMP/stdout")"
+
+# The config file picks the theme.
+DIRT3="$TMP/themet3"
+mkdir -p "$DIRT3"
+CFG_T="$TMP/theme.conf"
+cat > "$CFG_T" <<EOF
+STATE_DIR="$DIRT3"
+THEME="Cobalt"
+EOF
+run_session "$DIRT3" 1 --dry-run --no-alert --no-sink --config "$CFG_T" 1 1 1
+check "the config file picks the theme" "Cobalt" "$(theme_of "$TMP/stdout")"
+
+# The environment variable beats the config file.
+printf '\n' | THEME=Rose STATE_DIR="$DIRT3" timeout 60 "$OBS" \
+    --dry-run --no-alert --no-sink --config "$CFG_T" 1 1 1 > "$TMP/stdout" 2>&1
+check "the environment variable beats the config file" "Rose" "$(theme_of "$TMP/stdout")"
+
+# A theme that was saved in a previous run is restored.
+DIRT4="$TMP/themet4"
+mkdir -p "$DIRT4"
+printf 'Gold\n' > "$DIRT4/theme.txt"
+run_session "$DIRT4" 1 --dry-run --no-alert --no-sink 1 1 1
+check "a saved theme is restored" "Gold" "$(theme_of "$TMP/stdout")"
+
+# An unknown theme name is reported and does not stop the script.
+DIRT5="$TMP/themet5"
+mkdir -p "$DIRT5"
+run_session "$DIRT5" 1 --dry-run --no-alert --no-sink --theme Nope 1 1 1
+check "an unknown theme still runs" "0" "$?"
+check_contains "an unknown theme is reported" "Warning: unknown theme" "$(cat "$TMP/stdout")"
+check "an unknown theme falls back to the default" "Purple" "$(theme_of "$TMP/stdout")"
+
+# ---------------------------------------------------------------------------
 section "Log rotation"
 # ---------------------------------------------------------------------------
 DIR6="$TMP/state6"
@@ -279,6 +348,17 @@ if command -v script >/dev/null 2>&1; then
     check_contains "quit is logged" "Quit requested by user" "$(cat "$DIRQ/log.txt")"
     check "quit resets the session file" "stopped" "$(cat "$DIRQ/session.txt")"
     check "quit zeroes the timer file" "00:00:00" "$(cat "$DIRQ/timer.txt")"
+
+    # Alt+T switches the color theme while the phase runs. The terminal
+    # sends it as ESC followed by "T".
+    DIRT="$TMP/statet"
+    mkdir -p "$DIRT"
+    pty_run "$DIRT" "sleep 1; printf '\033T'; sleep 3; printf '\n'" \
+        --dry-run --no-alert --no-sink 1 8 1
+    check_contains "the theme change is logged" "Theme changed to: Ocean" "$(cat "$DIRT/log.txt")"
+    check "the new theme is remembered" "Ocean" "$(cat "$DIRT/theme.txt")"
+    check_contains "the new theme is shown" "Theme: Ocean" \
+        "$(sed -e 's/\x1b\[[0-9;]*m//g' "$TMP/pty")"
 else
     printf '  \033[0;33mskip\033[0m pty tests (util-linux "script" not found)\n'
 fi

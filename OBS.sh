@@ -9,17 +9,96 @@
 # Example: ./OBS.sh 5 50 10            ->  5 rounds, 50 min study, 10 min break
 #          ./OBS.sh --dry-run 3 5 2    ->  3 rounds, 5 s study, 2 s break
 # Stop:    Ctrl+C, or press 'q' while a phase is running
+# Theme:   press Alt+T while a phase is running (see --list-themes)
 
 set -uo pipefail
 
 # ---------------------------------------------------------------------------
-# Terminal colors - Purple theme
+# Color themes
+#
+# A theme is a pair of ANSI colors:
+#   PRIMARY   - the bright accent: study phase, headings, points
+#   SECONDARY - the soft accent: break phase, boxes, borders
+# The theme can be changed while a phase is running with Alt+T; the choice
+# is remembered in the state directory.
 # ---------------------------------------------------------------------------
-PURPLE=$'\e[0;35m'
-MAGENTA=$'\e[1;35m'
+THEME_NAMES=(
+    Purple Ocean Forest Sunset Rose Gold
+    Mono   Ice    Ember  Neon   Cobalt Cherry
+)
+THEME_PRIMARY=(
+    $'\e[1;35m' $'\e[1;36m' $'\e[1;32m' $'\e[1;33m' $'\e[1;95m' $'\e[1;93m'
+    $'\e[1;37m' $'\e[1;96m' $'\e[1;91m' $'\e[1;92m' $'\e[1;34m' $'\e[1;91m'
+)
+THEME_SECONDARY=(
+    $'\e[0;35m' $'\e[0;34m' $'\e[0;32m' $'\e[0;31m' $'\e[0;31m' $'\e[0;33m'
+    $'\e[0;37m' $'\e[0;36m' $'\e[0;31m' $'\e[0;96m' $'\e[0;36m' $'\e[0;35m'
+)
+
+# The colors of the theme that is currently active.
+PRIMARY="${THEME_PRIMARY[0]}"
+SECONDARY="${THEME_SECONDARY[0]}"
+THEME_NAME="${THEME_NAMES[0]}"
+THEME_INDEX=0
+# A theme that was just picked is shown in the status line for a moment.
+THEME_NOTICE_UNTIL=0
+
 BOLD=$'\e[1m'
 DIM=$'\e[2m'
 NC=$'\e[0m'
+
+# ---------------------------------------------------------------------------
+# Theme handling
+# ---------------------------------------------------------------------------
+# set_theme <index>: make the theme with that index the active one.
+set_theme() {
+    local i=${1:-0}
+    (( i >= 0 && i < ${#THEME_NAMES[@]} )) || return 1
+    THEME_INDEX=$i
+    THEME_NAME="${THEME_NAMES[i]}"
+    PRIMARY="${THEME_PRIMARY[i]}"
+    SECONDARY="${THEME_SECONDARY[i]}"
+    return 0
+}
+
+# theme_index <name>: the index of the theme with that name, case ignored.
+theme_index() {
+    local want=${1:-} i
+    [[ -n "$want" ]] || return 1
+    want=${want,,}
+    for i in "${!THEME_NAMES[@]}"; do
+        if [[ "${THEME_NAMES[i],,}" == "$want" ]]; then
+            printf '%s\n' "$i"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# save_theme: remember the active theme in the state directory.
+save_theme() {
+    [[ -n "$THEME_FILE" ]] || return 0
+    printf '%s\n' "$THEME_NAME" > "$THEME_FILE" 2>/dev/null || true
+}
+
+# cycle_theme: switch to the next theme, remember it and show it for a
+# moment in the status line.
+cycle_theme() {
+    local i=$(( (THEME_INDEX + 1) % ${#THEME_NAMES[@]} ))
+    set_theme "$i"
+    save_theme
+    THEME_NOTICE_UNTIL=$(( SECONDS + 3 ))
+    log_event "Theme changed to: $THEME_NAME"
+}
+
+# list_themes: print every available theme.
+list_themes() {
+    local i
+    for i in "${!THEME_NAMES[@]}"; do
+        printf '  %-8s %s%s%s\n' "${THEME_NAMES[i]}" \
+            "${THEME_PRIMARY[i]}" "████" "${THEME_SECONDARY[i]}"
+    done
+}
 
 # ---------------------------------------------------------------------------
 # Environment overrides
@@ -35,6 +114,7 @@ ENV_SINK_NAME="${SINK_NAME:-}"
 ENV_STATE_DIR="${STATE_DIR:-}"
 ENV_MAX_LOG_BYTES="${MAX_LOG_BYTES:-}"
 ENV_QUOTES="${QUOTES:-}"
+ENV_THEME="${THEME:-}"
 
 # ---------------------------------------------------------------------------
 # Built-in defaults
@@ -87,44 +167,16 @@ USE_SINK=1
 ROUNDS=""
 STUDY_MIN=""
 BREAK_MIN=""
+CLI_THEME=""
 
 # "minutes" normally, "seconds" in --dry-run mode.
 DURATION_UNIT="minutes"
 # How many seconds one duration unit is worth.
 SECONDS_PER_UNIT=60
 
-usage() {
-    {
-        echo "Usage: $0 [options] <rounds> <study_minutes> <break_minutes>"
-        echo
-        echo "Options:"
-        echo "  -h, --help          Show this help and exit"
-        echo "  -c, --config FILE   Load settings from FILE (bash syntax)"
-        echo "  -d, --dry-run       Treat the durations as seconds (fast testing)"
-        echo "  -n, --no-alert      Disable the audio alert"
-        echo "  -s, --no-sink       Don't create or use the OBS virtual audio sink"
-        echo
-        echo "Arguments:"
-        echo "  rounds             1-50   number of study rounds"
-        echo "  study_minutes      1-600  length of a study phase"
-        echo "  break_minutes      1-120  length of a break phase"
-        echo
-        echo "Example: $0 5 50 10"
-        echo "Example: $0 --config ~/obs-panel.conf 5 50 10"
-        echo "Example: $0 --dry-run 3 5 2   # 3 rounds, 5 s study, 2 s break"
-        echo
-        echo "Keys (while a phase is running):"
-        echo "  p / space   pause and resume the current phase"
-        echo "  s           skip the rest of the current phase"
-        echo "  q           quit the session"
-        echo
-        echo "Environment overrides: ALERT_SOUND, SINK_NAME, QUOTES, STATE_DIR, MAX_LOG_BYTES"
-        echo "Config file: --config FILE, \$OBS_PANEL_CONFIG, \$XDG_CONFIG_HOME/obs-study-panel/config"
-    } >&2
-    exit 1
-}
-
+# print_help [code]: print the help text and exit with <code> (default 0).
 print_help() {
+    local code=${1:-0}
     cat <<EOF
 Usage: $(basename "$0") [options] <rounds> <study_minutes> <break_minutes>
 
@@ -137,6 +189,8 @@ Options:
   -d, --dry-run       Treat the durations as seconds (fast testing)
   -n, --no-alert      Disable the audio alert
   -s, --no-sink       Don't create or use the OBS virtual audio sink
+  -t, --theme NAME    Use a color theme (see --list-themes)
+      --list-themes   Show the available color themes and exit
 
 Arguments:
   rounds             1-50   number of study rounds
@@ -146,27 +200,39 @@ Arguments:
 Examples:
   $(basename "$0") 5 50 10           # 5 rounds, 50 min study, 10 min break
   $(basename "$0") --dry-run 3 5 2   # 3 rounds, 5 s study, 2 s break
+  $(basename "$0") --theme Ocean 5 50 10
 
 Keys (while a phase is running):
   p / space   pause and resume the current phase
   s           skip the rest of the current phase
   q           quit the session
+  Alt+T       switch to the next color theme
 
-Environment overrides: ALERT_SOUND, SINK_NAME, QUOTES, STATE_DIR, MAX_LOG_BYTES
+Environment overrides:
+  ALERT_SOUND, SINK_NAME, QUOTES, STATE_DIR, MAX_LOG_BYTES, THEME
 
 Config file (first one that exists):
   --config FILE | \$OBS_PANEL_CONFIG | \$XDG_CONFIG_HOME/obs-study-panel/config
 EOF
+    exit "$code"
+}
+
+# usage: print the help to stderr and exit with an error.
+usage() {
+    print_help 1 >&2
 }
 
 while (( $# )); do
     case "$1" in
-        -h|--help)      print_help; exit 0 ;;
+        -h|--help)      print_help 0 ;;
         -c|--config)    [[ $# -ge 2 ]] || { echo "Error: $1 needs a file argument" >&2; usage; }
                         CONFIG_FILE=$2; shift 2 ;;
         -d|--dry-run)   DRY_RUN=1; shift ;;
         -n|--no-alert)  USE_ALERT=0; shift ;;
         -s|--no-sink)   USE_SINK=0; shift ;;
+        -t|--theme)     [[ $# -ge 2 ]] || { echo "Error: $1 needs a theme name" >&2; usage; }
+                        CLI_THEME=$2; shift 2 ;;
+        --list-themes)  list_themes; exit 0 ;;
         --)             shift; break ;;
         -*)             echo "Error: unknown option: $1" >&2; usage ;;
         *)              break ;;
@@ -306,6 +372,27 @@ POINTS_FILE="$STATE_DIR/points.txt"
 MESSAGE_FILE="$STATE_DIR/message.txt"
 NEXT_FILE="$STATE_DIR/next.txt"
 OVERLAY_FILE="$STATE_DIR/overlay.txt"
+THEME_FILE="$STATE_DIR/theme.txt"
+
+# ---------------------------------------------------------------------------
+# Theme selection
+#
+# The theme is picked in this order:
+#   --theme NAME  >  $THEME  >  config file  >  the saved theme  >  default
+# ---------------------------------------------------------------------------
+THEME_REQUEST="$CLI_THEME"
+[[ -z "$THEME_REQUEST" && -n "$ENV_THEME" ]] && THEME_REQUEST="$ENV_THEME"
+[[ -z "$THEME_REQUEST" && -n "${THEME:-}" ]] && THEME_REQUEST="$THEME"
+if [[ -z "$THEME_REQUEST" && -f "$THEME_FILE" ]]; then
+    THEME_REQUEST="$(head -n 1 "$THEME_FILE" 2>/dev/null || true)"
+fi
+if [[ -n "$THEME_REQUEST" ]]; then
+    if theme_idx="$(theme_index "$THEME_REQUEST")"; then
+        set_theme "$theme_idx"
+    else
+        echo "Warning: unknown theme '$THEME_REQUEST', using ${THEME_NAME}" >&2
+    fi
+fi
 
 # The state that is mirrored into the OBS files (see publish_state).
 SESSION_TEXT=""
@@ -328,7 +415,7 @@ STATE_FINALIZED=0
 # Startup logo
 # ---------------------------------------------------------------------------
 print_logo() {
-    echo "${MAGENTA}"
+    echo "${PRIMARY}"
     cat <<'EOF'
  /$$$$$$$$      /$$    /$$ /$$$$$$$$ /$$   /$$
 | $$_____/     | $$   | $$| $$_____/| $$  / $$
@@ -340,7 +427,7 @@ print_logo() {
 |________/         \_/    |________/|__/  |__/
 EOF
     echo "${NC}"
-    echo "${MAGENTA}${BOLD}     Study / Break Timer Protocol${NC}"
+    echo "${PRIMARY}${BOLD}     Study / Break Timer Protocol${NC}"
     echo "${DIM}── live state written to date · day · session · timer · log${NC}"
     echo
 }
@@ -362,6 +449,12 @@ update_date_day() {
     printf '%s\n' "$dow" > "$DAY_FILE"
 }
 
+# sync_state: refresh the date files and write every OBS file.
+sync_state() {
+    update_date_day
+    publish_state
+}
+
 # publish_state: write every OBS file from the current state variables.
 # Only bash builtins, no forks - this runs once per second.
 publish_state() {
@@ -371,22 +464,15 @@ publish_state() {
     printf '%s\n' "$NEXT_TEXT"     > "$NEXT_FILE"
     printf '%s\n' "$MESSAGE_TEXT"  > "$MESSAGE_FILE"
 
-    local i bar=""
-    for (( i=0; i<FILE_BAR_WIDTH; i++ )); do
-        if (( i < PCT * FILE_BAR_WIDTH / 100 )); then
-            bar+="#"
-        else
-            bar+="-"
-        fi
-    done
-    printf '[%s] %3d%%\n' "$bar" "$PCT" > "$PROGRESS_FILE"
+    make_bar "$(( PCT * FILE_BAR_WIDTH / 100 ))" "$FILE_BAR_WIDTH" "#" "-"
+    printf '[%s] %3d%%\n' "$BAR" "$PCT" > "$PROGRESS_FILE"
 
     # One-file overlay for people who want a single OBS text source.
     {
         printf '%s  %s\n' "$LAST_DATE" "$LAST_DAY"
         printf '%s\n' "$SESSION_TEXT"
         printf '%s\n' "$REMAINING_STR"
-        printf '[%s] %3d%%\n' "$bar" "$PCT"
+        printf '[%s] %3d%%\n' "$BAR" "$PCT"
         printf 'Pts: %d\n' "$POINTS"
         printf 'Next: %s\n' "$NEXT_TEXT"
         if [[ -n "$MESSAGE_TEXT" ]]; then
@@ -486,7 +572,7 @@ play_alert() {
     else
         "${player[@]}" "$ALERT_SOUND" &>/dev/null &
         ALERT_PID=$!
-        echo "${PURPLE}-> alert on default device (OBS sink unavailable)${NC}"
+        echo "${SECONDARY}-> alert on default device (OBS sink unavailable)${NC}"
     fi
 }
 
@@ -500,20 +586,31 @@ KEY=""
 KEY_READ=0
 
 # wait_key <timeout>: wait up to <timeout> seconds for one keypress.
-# Sets KEY to the character (empty for Enter) and KEY_READ to 1 when a key
-# was actually read, 0 on timeout.
+# Sets KEY to the character (empty for Enter, "alt-t" for Alt+T) and KEY_READ
+# to 1 when a key was actually read, 0 on timeout.
 wait_key() {
-    local timeout=${1:-1}
+    local timeout=${1:-1} next=""
     KEY=""
     KEY_READ=0
-    if [[ -t 0 ]]; then
-        # rc 0 = a key was read, rc 142 = timeout.
-        if IFS= read -rsn1 -t "$timeout" KEY; then
-            KEY_READ=1
-        fi
-    else
+    if [[ ! -t 0 ]]; then
         # Nothing to read from (piped input, cron, ...): just wait it out.
         sleep "$timeout"
+        return 0
+    fi
+    # rc 0 = a key was read, rc 142 = timeout.
+    if IFS= read -rsn1 -t "$timeout" KEY; then
+        KEY_READ=1
+    fi
+    (( KEY_READ )) || return 0
+
+    # ESC starts an escape sequence: the arrow keys send "ESC [ A", while
+    # Alt+<key> sends "ESC <key>". Only Alt+T is used here, the rest is
+    # swallowed.
+    if [[ "$KEY" == $'\e' ]]; then
+        KEY=""
+        if IFS= read -rsn1 -t 0.3 next; then
+            [[ "$next" == "T" || "$next" == "t" ]] && KEY="alt-t"
+        fi
     fi
     return 0
 }
@@ -549,52 +646,64 @@ wait_for_enter() {
 }
 
 # ---------------------------------------------------------------------------
-# Status / progress UI
+# Progress bars
 # ---------------------------------------------------------------------------
-draw_status() {
-    local label=$1 round=$2 total_rounds=$3 elapsed=$4 total=$5 paused=$6
-    local width=24
-    local filled=0
-    if (( total > 0 )); then
-        filled=$(( elapsed * width / total ))
-    fi
-    (( filled > width )) && filled=$width
-    local i bar=""
+# make_bar <filled> <width> <fill char> <empty char> [head char]
+# Builds a progress bar in the global BAR. It uses no forks, so it is safe to
+# call in the once-per-second tick loop.
+make_bar() {
+    local filled=$1 width=$2 fill=$3 empty=$4 head=${5:-} i
+    BAR=""
     for (( i=0; i<width; i++ )); do
         if (( i < filled )); then
-            if (( i == filled - 1 )); then
-                bar+=">"
+            if [[ -n "$head" ]] && (( i == filled - 1 )); then
+                BAR+="$head"
             else
-                bar+="="
+                BAR+="$fill"
             fi
         else
-            bar+=" "
+            BAR+="$empty"
         fi
     done
+}
+
+# ---------------------------------------------------------------------------
+# Status / progress UI
+# ---------------------------------------------------------------------------
+TERM_BAR_WIDTH=24
+
+draw_status() {
+    local label=$1 round=$2 total_rounds=$3 elapsed=$4 total=$5 paused=$6
+    local filled=0
+    if (( total > 0 )); then
+        filled=$(( elapsed * TERM_BAR_WIDTH / total ))
+    fi
+    (( filled > TERM_BAR_WIDTH )) && filled=$TERM_BAR_WIDTH
+    make_bar "$filled" "$TERM_BAR_WIDTH" "=" " " ">"
 
     # The percentage comes from the shared state, so the terminal and the
     # OBS files always show the same number.
     local pct=$PCT
 
-    local color
-    if [[ "$label" == "STUDY" ]]; then
-        color="$MAGENTA"
-    else
-        color="$PURPLE"
-    fi
+    phase_color "$label"
+    local color=$COLOR
 
     local flag=""
     if (( paused )); then
-        flag="${MAGENTA} PAUSED${NC}"
+        flag="${PRIMARY} PAUSED${NC}"
+    fi
+    # A theme that was just switched to is shown for a few seconds.
+    if (( SECONDS < THEME_NOTICE_UNTIL )); then
+        flag="${flag}  ${DIM}Theme: $THEME_NAME${NC}"
     fi
 
     printf '\r\033[K'
     printf '%s%s%-6s%s [%d/%d] %s[%s]%s %3d%%  %s  %sPts:%d%s%s' \
         "$BOLD" "$color" "$label" "$NC" \
         "$round" "$total_rounds" \
-        "$color" "$bar" "$NC" \
+        "$color" "$BAR" "$NC" \
         "$pct" "$REMAINING_STR" \
-        "$MAGENTA" "$POINTS" "$NC" "$flag"
+        "$PRIMARY" "$POINTS" "$NC" "$flag"
 }
 
 BOX_INNER=62
@@ -609,16 +718,24 @@ box_row() {
     printf '%s║%s%*s%s║%s\n' "$color" "$styled" "$pad" "" "$color" "$NC"
 }
 
+# phase_color <label>: the color of a phase - the study phase is bright, the
+# break phase is soft. The result is put in the global COLOR, so the tick
+# loop stays free of forks.
+phase_color() {
+    if [[ "$1" == "STUDY" ]]; then
+        COLOR="$PRIMARY"
+    else
+        COLOR="$SECONDARY"
+    fi
+}
+
 phase_header() {
     # $1 = label, $2 = round, $3 = total, $4 = minutes, $5 = subtitle
     local label=$1 round=$2 total=$3 minutes=$4 subtitle=${5:-}
     subtitle=${subtitle:0:$(( BOX_INNER - 4 ))}
     local color bar
-    if [[ "$label" == "STUDY" ]]; then
-        color="$MAGENTA"
-    else
-        color="$PURPLE"
-    fi
+    phase_color "$label"
+    color=$COLOR
     printf -v bar '%*s' "$BOX_INNER" ''
     bar=${bar// /═}
 
@@ -629,8 +746,8 @@ phase_header() {
         "  ${BOLD}${label}${NC}${color}  ·  Round ${round} / ${total}  ·  $(duration_label "$minutes")"
     box_row "$color" "  ${subtitle}" "  ${DIM}${subtitle}${NC}${color}"
     if [[ -t 0 ]]; then
-        box_row "$color" "  p pause  ·  s skip  ·  q quit" \
-            "  ${DIM}p pause  ·  s skip  ·  q quit${NC}${color}"
+        local keys="  p pause  ·  s skip  ·  q quit  ·  Alt+T theme"
+        box_row "$color" "$keys" "${DIM}${keys}${NC}${color}"
     fi
     echo "${color}╚${bar}╝${NC}"
     echo
@@ -654,20 +771,15 @@ show_completion() {
         title="BREAK COMPLETE"
     fi
 
-    local color
-    if [[ "$phase" == "STUDY" ]]; then
-        color="$MAGENTA"
-    else
-        color="$PURPLE"
-    fi
-
+    phase_color "$phase"
+    local color=$COLOR
     echo
     echo "${color}${line}${NC}"
     printf '%s%*s%s\n' "$color" $(( (width + ${#title}) / 2 )) "$title" "$NC"
     echo "${color}${line}${NC}"
     echo
     printf '  Round:   %s%d%s / %d\n'        "$BOLD" "$round" "$NC" "$total_rounds"
-    printf '  Points:  %s%d%s\n'             "$MAGENTA" "$POINTS" "$NC"
+    printf '  Points:  %s%d%s\n'             "$PRIMARY" "$POINTS" "$NC"
     echo
     if [[ "$next_phase" == "None" ]]; then
         printf '  Next:    %sSession complete%s\n' "$DIM" "$NC"
@@ -675,7 +787,7 @@ show_completion() {
         printf '  Next:    %s%s%s\n' "$BOLD" "$next_phase" "$NC"
     fi
     echo
-    printf '  %sPress Enter to continue...%s' "$MAGENTA" "$NC"
+    printf '  %sPress Enter to continue...%s' "$PRIMARY" "$NC"
 }
 
 # ---------------------------------------------------------------------------
@@ -698,134 +810,182 @@ rounds_label() {
     if (( $1 == 1 )); then echo "1 round"; else echo "$1 rounds"; fi
 }
 
+# run_phase <type> <minutes> <round> <total_rounds>
+# Run one phase: prepare it, count it down, close it.
 run_phase() {
+    phase_prepare "$1" "$2" "$3" "$4"
+    phase_count "$3" "$4"
+    phase_finish "$3" "$4"
+}
+
+# The state of the phase that is running. It lives in globals so that the
+# three steps of a phase (prepare, count, finish) all work on the same data.
+PHASE_LABEL=""
+PHASE_SUBTITLE=""
+PHASE_NEXT=""
+PHASE_TOTAL=0
+PHASE_ELAPSED=0
+PHASE_PAUSED=0
+PHASE_SKIPPED=0
+# The wall-clock second the phase started, plus the seconds spent paused.
+PHASE_START=0
+PHASE_PAUSED_TOTAL=0
+PHASE_PAUSE_AT=0
+
+# phase_prepare <type> <minutes> <round> <total_rounds>
+# Set up the state of a phase and draw its header.
+phase_prepare() {
     local type=$1 minutes=$2 round=$3 total_rounds=$4
-    local label subtitle next_phase
 
     if [[ "$type" == "study" ]]; then
-        label="STUDY"
+        PHASE_LABEL="STUDY"
         if (( ${#QUOTE_LIST[@]} > 0 )); then
-            subtitle="${QUOTE_LIST[$(( RANDOM % ${#QUOTE_LIST[@]} ))]}"
+            PHASE_SUBTITLE="${QUOTE_LIST[$(( RANDOM % ${#QUOTE_LIST[@]} ))]}"
         else
-            # An empty QUOTES would be a division by zero below.
-            subtitle="Stay focused."
+            # An empty quote list would be a division by zero.
+            PHASE_SUBTITLE="Stay focused."
         fi
     else
-        label="BREAK"
-        subtitle="Relax and recharge."
+        PHASE_LABEL="BREAK"
+        PHASE_SUBTITLE="Relax and recharge."
     fi
 
     # What comes after this phase, shown live in next.txt / overlay.txt.
     if [[ "$type" == "study" ]]; then
         if (( round < total_rounds )); then
-            next_phase="Break ($(duration_label "$BREAK_MIN"))"
+            PHASE_NEXT="Break ($(duration_label "$BREAK_MIN"))"
         else
-            next_phase="None"
+            PHASE_NEXT="None"
         fi
     else
-        next_phase="Study ($(duration_label "$STUDY_MIN"))"
+        PHASE_NEXT="Study ($(duration_label "$STUDY_MIN"))"
     fi
 
-    local total=$(( minutes * SECONDS_PER_UNIT )) elapsed=0
+    PHASE_TOTAL=$(( minutes * SECONDS_PER_UNIT ))
+    PHASE_ELAPSED=0
+    PHASE_PAUSED=0
+    PHASE_SKIPPED=0
     # Count against the shell's wall-clock ($SECONDS) instead of adding 1 per
     # loop: each iteration costs a bit more than 1s (file writes, redraw), so
     # a naive counter makes a 50 min phase run noticeably longer.
-    # `paused_total` holds the seconds spent paused, so the countdown freezes
-    # while the phase is paused and resumes exactly where it left off.
-    local start=$SECONDS paused_total=0 pause_at=0
-    local paused=0 skipped=0
+    PHASE_START=$SECONDS
+    # The seconds spent paused: the countdown freezes while the phase is
+    # paused and resumes exactly where it left off.
+    PHASE_PAUSED_TOTAL=0
+    PHASE_PAUSE_AT=0
 
-    SESSION_TEXT="$label $round/$total_rounds"
+    SESSION_TEXT="$PHASE_LABEL $round/$total_rounds"
     printf -v REMAINING_STR '%02d:%02d:%02d' \
-        $((total/3600)) $((total%3600/60)) $((total%60))
+        $((PHASE_TOTAL/3600)) $((PHASE_TOTAL%3600/60)) $((PHASE_TOTAL%60))
     PCT=0
-    NEXT_TEXT="$next_phase"
+    NEXT_TEXT="$PHASE_NEXT"
     # "None" is the internal marker for "no phase follows"; on the stream
     # that reads better as a finished session.
     [[ "$NEXT_TEXT" == "None" ]] && NEXT_TEXT="Session complete"
-    MESSAGE_TEXT="$subtitle"
+    MESSAGE_TEXT="$PHASE_SUBTITLE"
 
-    log_event "Start: $label $round/$total_rounds ($(duration_label "$minutes"))"
-    phase_header "$label" "$round" "$total_rounds" "$minutes" "$subtitle"
-    update_date_day
-    publish_state
+    log_event "Start: $PHASE_LABEL $round/$total_rounds ($(duration_label "$minutes"))"
+    phase_header "$PHASE_LABEL" "$round" "$total_rounds" "$minutes" "$PHASE_SUBTITLE"
+    sync_state
+}
 
-    while (( elapsed < total )); do
-        local remaining=$(( total - elapsed ))
+# phase_handle_key <round> <total_rounds>: act on the key that was pressed.
+phase_handle_key() {
+    local round=$1 total_rounds=$2
+    case "$KEY" in
+        p|P|' ')
+            if (( PHASE_PAUSED )); then
+                # *Add* the pause to the total instead of replacing it: the
+                # countdown has to stay frozen for the sum of every pause,
+                # not just for the last one.
+                PHASE_PAUSED_TOTAL=$(( PHASE_PAUSED_TOTAL + SECONDS - PHASE_PAUSE_AT ))
+                PHASE_PAUSED=0
+                log_event "Resumed: $PHASE_LABEL $round/$total_rounds"
+            else
+                PHASE_PAUSED=1
+                PHASE_PAUSE_AT=$SECONDS
+                log_event "Paused: $PHASE_LABEL $round/$total_rounds"
+            fi
+            ;;
+        s|S)
+            PHASE_SKIPPED=1
+            log_event "Skipped: $PHASE_LABEL $round/$total_rounds"
+            ;;
+        q|Q)
+            log_event "Quit requested by user"
+            cleanup 0
+            ;;
+        alt-t)
+            cycle_theme
+            ;;
+    esac
+}
+
+# phase_count <round> <total_rounds>: count the phase down and react to the
+# keys that are pressed while it runs.
+phase_count() {
+    local round=$1 total_rounds=$2
+    while (( PHASE_ELAPSED < PHASE_TOTAL )); do
+        local remaining=$(( PHASE_TOTAL - PHASE_ELAPSED ))
         (( remaining < 0 )) && remaining=0
         printf -v REMAINING_STR '%02d:%02d:%02d' \
             $((remaining/3600)) $((remaining%3600/60)) $((remaining%60))
         PCT=0
-        (( total > 0 )) && PCT=$(( elapsed * 100 / total ))
+        (( PHASE_TOTAL > 0 )) && PCT=$(( PHASE_ELAPSED * 100 / PHASE_TOTAL ))
         (( PCT > 100 )) && PCT=100
-        SESSION_TEXT="$label $round/$total_rounds"
-        (( paused )) && SESSION_TEXT="$SESSION_TEXT (PAUSED)"
+        SESSION_TEXT="$PHASE_LABEL $round/$total_rounds"
+        (( PHASE_PAUSED )) && SESSION_TEXT="$SESSION_TEXT (PAUSED)"
 
-        update_date_day
-        publish_state
+        sync_state
 
         # Redraw every tick so the terminal countdown matches timer.txt. This
         # is pure bash builtins (no forks), so it costs next to nothing.
-        draw_status "$label" "$round" "$total_rounds" "$elapsed" "$total" "$paused"
+        draw_status "$PHASE_LABEL" "$round" "$total_rounds" \
+            "$PHASE_ELAPSED" "$PHASE_TOTAL" "$PHASE_PAUSED"
 
         wait_key 1
         if (( KEY_READ )); then
-            case "$KEY" in
-                p|P|' ')
-                    if (( paused )); then
-                        # *Add* the pause to the total instead of replacing it:
-                        # the countdown has to stay frozen for the sum of every
-                        # pause, not just for the last one.
-                        paused_total=$(( paused_total + SECONDS - pause_at ))
-                        paused=0
-                        log_event "Resumed: $label $round/$total_rounds"
-                    else
-                        paused=1
-                        pause_at=$SECONDS
-                        log_event "Paused: $label $round/$total_rounds"
-                    fi
-                    ;;
-                s|S)
-                    skipped=1
-                    log_event "Skipped: $label $round/$total_rounds"
-                    break
-                    ;;
-                q|Q)
-                    log_event "Quit requested by user"
-                    cleanup 0
-                    ;;
-            esac
+            phase_handle_key "$round" "$total_rounds"
+            # A skipped phase ends right away.
+            (( PHASE_SKIPPED )) && break
         fi
 
-        if (( ! paused )); then
+        if (( ! PHASE_PAUSED )); then
             # Only recompute the elapsed time while the timer runs: while it
             # is paused the countdown has to stay frozen where it was.
-            elapsed=$(( SECONDS - start - paused_total ))
+            PHASE_ELAPSED=$(( SECONDS - PHASE_START - PHASE_PAUSED_TOTAL ))
         fi
     done
+}
 
-    # Phase is over (finished, or skipped).
-    if (( skipped )); then
+# phase_finish <round> <total_rounds>: close the phase, play the alert and
+# wait for the user to continue.
+phase_finish() {
+    local round=$1 total_rounds=$2
+
+    # The phase is over (finished, or skipped).
+    if (( PHASE_SKIPPED )); then
         # A skipped phase doesn't earn a point.
-        SESSION_TEXT="$label $round/$total_rounds (SKIPPED)"
+        SESSION_TEXT="$PHASE_LABEL $round/$total_rounds (SKIPPED)"
     else
         PCT=100
         POINTS=$(( POINTS + 1 ))
     fi
     REMAINING_STR="00:00:00"
-    update_date_day
-    publish_state
+    sync_state
     # Final redraw so the bar ends at 100% / 00:00:00 instead of whatever the
-    # last throttled update (up to 5s earlier) happened to show. A skipped
-    # phase keeps its real progress, so the bar matches the published PCT.
-    draw_status "$label" "$round" "$total_rounds" "$elapsed" "$total" "0"
+    # last update happened to show. A skipped phase keeps its real progress,
+    # so the bar matches the published PCT.
+    draw_status "$PHASE_LABEL" "$round" "$total_rounds" \
+        "$PHASE_ELAPSED" "$PHASE_TOTAL" "0"
     printf '\n'
-    log_event "End: $label $round/$total_rounds"
+    log_event "End: $PHASE_LABEL $round/$total_rounds"
 
     play_alert
 
     discard_pending_input
-    show_completion "$label" "$round" "$total_rounds" "$next_phase" "$skipped"
+    show_completion "$PHASE_LABEL" "$round" "$total_rounds" \
+        "$PHASE_NEXT" "$PHASE_SKIPPED"
     # Block until user is ready. No input besides Enter needed.
     wait_for_enter
     stop_alert   # silence the alarm once the user has acknowledged it
@@ -843,8 +1003,7 @@ reset_state_files() {
     REMAINING_STR="00:00:00"
     PCT=0
     NEXT_TEXT=""
-    update_date_day
-    publish_state
+    sync_state
 }
 
 cleanup() {
@@ -859,7 +1018,7 @@ cleanup() {
     log_event "Protocol stopped manually"
     {
         echo
-        echo "${PURPLE}${BOLD}Interrupted.${NC} ${DIM}State files reset to stopped.${NC}"
+        echo "${SECONDARY}${BOLD}Interrupted.${NC} ${DIM}State files reset to stopped.${NC}"
     } 2>/dev/null
     exit "$code"
 }
@@ -894,7 +1053,7 @@ update_date_day
 STATE_READY=1
 log_event "Starting new study protocol: $(rounds_label "$ROUNDS"), $(duration_label "$STUDY_MIN") study, $(duration_label "$BREAK_MIN") break"
 
-echo "${PURPLE}Protocol:${NC} ${BOLD}$(rounds_label "$ROUNDS")${NC}  ${DIM}|${NC}  ${BOLD}$(duration_label "$STUDY_MIN")${NC} study  ${DIM}|${NC}  ${BOLD}$(duration_label "$BREAK_MIN")${NC} break"
+echo "${SECONDARY}Protocol:${NC} ${BOLD}$(rounds_label "$ROUNDS")${NC}  ${DIM}|${NC}  ${BOLD}$(duration_label "$STUDY_MIN")${NC} study  ${DIM}|${NC}  ${BOLD}$(duration_label "$BREAK_MIN")${NC} break  ${DIM}|${NC}  ${BOLD}Theme: ${THEME_NAME}${NC}"
 if [[ -n "$CONFIG_LOADED" ]]; then
     echo "${DIM}Config: $CONFIG_LOADED${NC}"
 fi
@@ -913,8 +1072,7 @@ SESSION_TEXT="session complete"
 REMAINING_STR="00:00:00"
 PCT=100
 NEXT_TEXT=""
-update_date_day
-publish_state
+sync_state
 # The files show the final state, so the exit trap must not reset them.
 STATE_FINALIZED=1
 log_event "Protocol complete - total points: $POINTS"
@@ -933,13 +1091,13 @@ BANNER_BORDER=""
 echo
 printf -v BANNER_BORDER '%*s' "$BANNER_WIDTH" ''
 BANNER_BORDER=${BANNER_BORDER// /#}
-echo "${MAGENTA}${BANNER_BORDER}${NC}"
+echo "${PRIMARY}${BANNER_BORDER}${NC}"
 printf '%s#%s%*s%s%s%*s%s#%s\n' \
-    "$MAGENTA" "$NC" "$BANNER_PAD" "" "$BOLD" "$BANNER_TITLE" \
-    "$(( BANNER_INNER - BANNER_PAD - ${#BANNER_TITLE} ))" "" "$NC" "$MAGENTA"
-echo "${MAGENTA}${BANNER_BORDER}${NC}"
+    "$PRIMARY" "$NC" "$BANNER_PAD" "" "$BOLD" "$BANNER_TITLE" \
+    "$(( BANNER_INNER - BANNER_PAD - ${#BANNER_TITLE} ))" "" "$NC" "$PRIMARY"
+echo "${PRIMARY}${BANNER_BORDER}${NC}"
 echo
-printf '  %sTotal Rounds:%s  %s%d%s\n' "$BOLD" "$NC" "$MAGENTA" "$ROUNDS" "$NC"
-printf '  %sTotal Points:%s %s%d%s\n' "$BOLD" "$NC" "$MAGENTA" "$POINTS" "$NC"
+printf '  %sTotal Rounds:%s  %s%d%s\n' "$BOLD" "$NC" "$PRIMARY" "$ROUNDS" "$NC"
+printf '  %sTotal Points:%s %s%d%s\n' "$BOLD" "$NC" "$PRIMARY" "$POINTS" "$NC"
 echo
-echo "${MAGENTA}${BOLD}Great work!${NC} ${DIM}Exiting.${NC}"
+echo "${PRIMARY}${BOLD}Great work!${NC} ${DIM}Exiting.${NC}"

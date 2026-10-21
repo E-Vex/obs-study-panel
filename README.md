@@ -40,6 +40,8 @@ completes.
 | `-d`, `--dry-run`   | Read the durations as **seconds** instead of minutes   |
 | `-n`, `--no-alert`  | Don't play the audio alert                             |
 | `-s`, `--no-sink`   | Don't create or use the OBS virtual audio sink         |
+| `-t`, `--theme NAME` | Use a color theme (see below)                        |
+| `--list-themes`     | Show the available color themes and exit               |
 
 `--dry-run` makes a whole session finish in seconds, which is handy for
 checking a setup before a real stream:
@@ -57,9 +59,45 @@ While a phase is running:
 | `p` / space | Pause and resume the current phase            |
 | `s`       | Skip the rest of the current phase (no point)   |
 | `q`       | Quit the session                                 |
+| `Alt+T`   | Switch to the next color theme                   |
 
 The countdown freezes while it is paused and resumes exactly where it stopped.
 The status line and `session.txt` show that the timer is on hold.
+
+## Color themes
+
+The script has 12 color themes. Every theme is a pair of colors: a bright
+accent for the study phase, headings and points, and a soft accent for the
+break phase, boxes and borders.
+
+```
+Purple (default)   Ocean   Forest   Sunset   Rose   Gold
+Mono               Ice     Ember    Neon     Cobalt Cherry
+```
+
+To see them with their real colors:
+
+```bash
+./OBS.sh --list-themes
+```
+
+Pick one for a single run:
+
+```bash
+./OBS.sh --theme Ocean 5 50 10
+```
+
+Or press `Alt+T` while a phase is running: the theme changes instantly, the
+name shows up in the status line for a few seconds and the choice is written
+to `theme.txt` in the state directory, so the next run starts with it.
+
+The theme is chosen in this order (first one that is set wins):
+
+```
+--theme NAME  >  $THEME  >  config file  >  theme.txt  >  Purple
+```
+
+An unknown theme name is reported and the default theme is used.
 
 ## Configuration
 
@@ -90,6 +128,7 @@ STATE_DIR="$HOME/obs-state"       # where the state files are written
 MAX_LOG_BYTES=1048576             # rotate log.txt past this size
 FILE_BAR_WIDTH=20                 # width of the bar in progress.txt
 NON_TTY_ENTER_TIMEOUT=300         # seconds to wait for Enter on a pipe
+THEME="Ocean"                     # color theme (see --list-themes)
 QUOTE_LIST=(
   "Your future self is watching"
   "One more round, then the break is yours"
@@ -101,12 +140,13 @@ file whose last command returns non-zero is perfectly fine.
 
 ### Environment variables
 
-`ALERT_SOUND`, `SINK_NAME`, `STATE_DIR`, `MAX_LOG_BYTES` and `QUOTES` can all
-be set in the environment; they take priority over the config file.
+`ALERT_SOUND`, `SINK_NAME`, `STATE_DIR`, `MAX_LOG_BYTES`, `THEME` and `QUOTES`
+can all be set in the environment; they take priority over the config file.
 `QUOTES` is a newline separated list and replaces the quote array:
 
 ```bash
 QUOTES=$'First line\nSecond line' ./OBS.sh 5 50 10
+THEME=Forest ./OBS.sh 5 50 10
 ```
 
 ## OBS state files
@@ -125,6 +165,7 @@ default); add them in OBS as *Text (read from file)* sources:
 | `message.txt`  | The quote of the running study phase           |
 | `next.txt`     | What comes next, e.g. `Break (10 minutes)`     |
 | `log.txt`      | Timestamped event log (rotated to `log.txt.1`) |
+| `theme.txt`    | The color theme that was picked last            |
 
 `overlay.txt` contains all of it in one file, if you prefer a single OBS
 source:
@@ -153,6 +194,6 @@ file is missing, the script falls back to the default output / skips the sound.
 ./tests/run-tests.sh
 ```
 
-69 checks that run in about a minute, in `--dry-run` mode inside a throwaway
+85 checks that run in about a minute, in `--dry-run` mode inside a throwaway
 directory. The interactive keys and the signal handling are driven through a
 pty, and those tests are skipped when util-linux `script` is not installed.
