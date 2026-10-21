@@ -569,11 +569,11 @@ phase_header() {
     printf -v bar '%*s' "$BOX_INNER" ''
     bar=${bar// /═}
 
-    local info="${label}  ·  Round ${round} / ${total}  ·  ${minutes} ${DURATION_UNIT}"
+    local info="${label}  ·  Round ${round} / ${total}  ·  $(duration_label "$minutes")"
     echo
     echo "${color}╔${bar}╗${NC}"
     box_row "$color" "  ${info}" \
-        "  ${BOLD}${label}${NC}${color}  ·  Round ${round} / ${total}  ·  ${minutes} ${DURATION_UNIT}"
+        "  ${BOLD}${label}${NC}${color}  ·  Round ${round} / ${total}  ·  $(duration_label "$minutes")"
     box_row "$color" "  ${subtitle}" "  ${DIM}${subtitle}${NC}${color}"
     if [[ -t 0 ]]; then
         box_row "$color" "  p pause  ·  s skip  ·  q quit" \
@@ -639,6 +639,10 @@ duration_label() {
     else
         echo "$n $DURATION_UNIT"
     fi
+}
+
+rounds_label() {
+    if (( $1 == 1 )); then echo "1 round"; else echo "$1 rounds"; fi
 }
 
 run_phase() {
@@ -805,9 +809,9 @@ trap 'cleanup 129' HUP
 print_logo
 setup_audio_sink
 update_date_day
-log_event "Starting new study protocol: $ROUNDS rounds, $(duration_label "$STUDY_MIN") study, $(duration_label "$BREAK_MIN") break"
+log_event "Starting new study protocol: $(rounds_label "$ROUNDS"), $(duration_label "$STUDY_MIN") study, $(duration_label "$BREAK_MIN") break"
 
-echo "${PURPLE}Protocol:${NC} ${BOLD}${ROUNDS}${NC} rounds  ${DIM}|${NC}  ${BOLD}${STUDY_MIN}${NC} $DURATION_UNIT study  ${DIM}|${NC}  ${BOLD}${BREAK_MIN}${NC} $DURATION_UNIT break"
+echo "${PURPLE}Protocol:${NC} ${BOLD}$(rounds_label "$ROUNDS")${NC}  ${DIM}|${NC}  ${BOLD}$(duration_label "$STUDY_MIN")${NC} study  ${DIM}|${NC}  ${BOLD}$(duration_label "$BREAK_MIN")${NC} break"
 if [[ -n "$CONFIG_LOADED" ]]; then
     echo "${DIM}Config: $CONFIG_LOADED${NC}"
 fi
@@ -833,15 +837,22 @@ log_event "Protocol complete - total points: $POINTS"
 # ---------------------------------------------------------------------------
 # Final summary
 # ---------------------------------------------------------------------------
+# The title is centered inside the box, so the banner reads the same way as
+# the phase header.
+BANNER_WIDTH=60
+BANNER_TITLE="ALL SESSIONS COMPLETE"
+BANNER_INNER=$(( BANNER_WIDTH - 2 ))
+BANNER_PAD=$(( (BANNER_INNER - ${#BANNER_TITLE}) / 2 ))
+BANNER_BORDER=""
+
 echo
-echo "${MAGENTA}############################################################${NC}"
-echo "${MAGENTA}#                                                          #${NC}"
-printf '%s#%s%s%s%s#%s\n' \
-    "$MAGENTA" "$NC" "$BOLD" \
-    "$(printf '%-58s' 'ALL SESSIONS COMPLETE')" \
-    "$NC" "$MAGENTA"
-echo "${MAGENTA}#                                                          #${NC}"
-echo "${MAGENTA}############################################################${NC}"
+printf -v BANNER_BORDER '%*s' "$BANNER_WIDTH" ''
+BANNER_BORDER=${BANNER_BORDER// /#}
+echo "${MAGENTA}${BANNER_BORDER}${NC}"
+printf '%s#%s%*s%s%s%*s%s#%s\n' \
+    "$MAGENTA" "$NC" "$BANNER_PAD" "" "$BOLD" "$BANNER_TITLE" \
+    "$(( BANNER_INNER - BANNER_PAD - ${#BANNER_TITLE} ))" "" "$NC" "$MAGENTA"
+echo "${MAGENTA}${BANNER_BORDER}${NC}"
 echo
 printf '  %sTotal Rounds:%s  %s%d%s\n' "$BOLD" "$NC" "$MAGENTA" "$ROUNDS" "$NC"
 printf '  %sTotal Points:%s %s%d%s\n' "$BOLD" "$NC" "$MAGENTA" "$POINTS" "$NC"
