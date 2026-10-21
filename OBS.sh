@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # OBS.sh - Study/break timer protocol
-# Writes live state to 5 text files (date.txt, day.txt, session.txt,
-# timer.txt, log.txt) for use as Text sources in OBS Studio.
+# Writes live state to text files (date.txt, day.txt, session.txt, timer.txt,
+# progress.txt, points.txt, message.txt, next.txt, overlay.txt, log.txt) for
+# use as Text sources in OBS Studio.
 #
 # Usage:   ./OBS.sh [options] <rounds> <study_minutes> <break_minutes>
 # Example: ./OBS.sh 5 50 10            ->  5 rounds, 50 min study, 10 min break
@@ -88,8 +89,19 @@ usage() {
         echo "  -n, --no-alert      Disable the audio alert"
         echo "  -s, --no-sink       Don't create or use the OBS virtual audio sink"
         echo
+        echo "Arguments:"
+        echo "  rounds             1-50   number of study rounds"
+        echo "  study_minutes      1-600  length of a study phase"
+        echo "  break_minutes      1-120  length of a break phase"
+        echo
         echo "Example: $0 5 50 10"
         echo "Example: $0 --config ~/obs-panel.conf 5 50 10"
+        echo "Example: $0 --dry-run 3 5 2   # 3 rounds, 5 s study, 2 s break"
+        echo
+        echo "Keys (while a phase is running):"
+        echo "  p / space   pause and resume the current phase"
+        echo "  s           skip the rest of the current phase"
+        echo "  q           quit the session"
         echo
         echo "Environment overrides: ALERT_SOUND, SINK_NAME, QUOTES, STATE_DIR, MAX_LOG_BYTES"
     } >&2
@@ -118,6 +130,11 @@ Arguments:
 Examples:
   $(basename "$0") 5 50 10           # 5 rounds, 50 min study, 10 min break
   $(basename "$0") --dry-run 3 5 2   # 3 rounds, 5 s study, 2 s break
+
+Keys (while a phase is running):
+  p / space   pause and resume the current phase
+  s           skip the rest of the current phase
+  q           quit the session
 
 Environment overrides: ALERT_SOUND, SINK_NAME, QUOTES, STATE_DIR, MAX_LOG_BYTES
 EOF
@@ -503,8 +520,9 @@ draw_status() {
         fi
     done
 
-    local pct=0
-    (( total > 0 )) && pct=$(( elapsed * 100 / total ))
+    # The percentage comes from the shared state, so the terminal and the
+    # OBS files always show the same number.
+    local pct=$PCT
 
     local color
     if [[ "$label" == "STUDY" ]]; then
@@ -571,7 +589,8 @@ show_completion() {
     local phase=$1 round=$2 total_rounds=$3 next_phase=$4 skipped=${5:-0}
     local width=60
     local line
-    line=$(printf '=%.0s' $(seq 1 $width))
+    printf -v line '%*s' "$width" ''
+    line=${line// /=}
 
     local title
     if [[ "$skipped" == "1" ]]; then
@@ -628,7 +647,12 @@ run_phase() {
 
     if [[ "$type" == "study" ]]; then
         label="STUDY"
-        subtitle="${QUOTE_LIST[$(( RANDOM % ${#QUOTE_LIST[@]} ))]}"
+        if (( ${#QUOTE_LIST[@]} > 0 )); then
+            subtitle="${QUOTE_LIST[$(( RANDOM % ${#QUOTE_LIST[@]} ))]}"
+        else
+            # An empty QUOTES would be a division by zero below.
+            subtitle="Stay focused."
+        fi
     else
         label="BREAK"
         subtitle="Relax and recharge."

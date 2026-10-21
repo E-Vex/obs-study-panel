@@ -148,6 +148,18 @@ else
     bad "QUOTES environment variable is used" "got [$QUOTE_FOUND]"
 fi
 
+# An empty quote list must not blow up on a division by zero.
+DIR5B="$TMP/state5b"
+CFG_EMPTY="$TMP/empty.conf"
+mkdir -p "$DIR5B"
+cat > "$CFG_EMPTY" <<EOF
+STATE_DIR="$DIR5B"
+QUOTE_LIST=()
+EOF
+run_session "$DIR5B" 1 --dry-run --no-alert --no-sink --config "$CFG_EMPTY" 1 1 1
+check "an empty quote list does not crash" "0" "$?"
+check "an empty quote list falls back to a default" "Stay focused." "$(cat "$DIR5B/message.txt")"
+
 # ---------------------------------------------------------------------------
 section "Log rotation"
 # ---------------------------------------------------------------------------
