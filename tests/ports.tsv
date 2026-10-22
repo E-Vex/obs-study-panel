@@ -24,3 +24,4 @@ OBS.cpp|C++|g++ -O2 -std=c++17 -o %BIN% %SRC%|%BIN%|s,/[*] CRASH-INJECT-POINT [*
 OBS.go|Go|go build -o %BIN% %SRC%|%BIN%|s,// CRASH-INJECT-POINT,panic("crash"),|42|
 OBS.rs|Rust|rustc -O --edition 2021 -o %BIN% %SRC%|%BIN%|s#// CRASH-INJECT-POINT#panic!("crash");#|42|
 OBS.java|Java|mkdir -p %BIN% && javac -d %BIN% %SRC%|java -cp %BIN% OBS|s,// CRASH-INJECT-POINT,crashExit(42);,|42|
+OBS.groovy|Groovy||groovy %SRC%|s,// CRASH-INJECT-POINT,System.exit(42);,|42|
