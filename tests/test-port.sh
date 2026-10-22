@@ -368,7 +368,7 @@ section "Unexpected death"
 if [[ -z "$CRASH_SED" ]]; then
     printf '  \033[0;33mskip\033[0m crash injection (not applicable to %s)\n' "$LANG_NAME"
 else
-    CRASH_SRC="$TMP/${FILE}.crash"
+    CRASH_SRC="$TMP/crash.${FILE##*.}"
     sed -e "$CRASH_SED" "$SRC" > "$CRASH_SRC" || { bad "crash injection" "sed failed"; }
     CRASH_BIN="$BUILD_DIR/${FILE}.crash.$$"
     if [[ -n "$BUILD" ]]; then
