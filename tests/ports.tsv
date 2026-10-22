@@ -25,3 +25,4 @@ OBS.go|Go|go build -o %BIN% %SRC%|%BIN%|s,// CRASH-INJECT-POINT,panic("crash"),|
 OBS.rs|Rust|rustc -O --edition 2021 -o %BIN% %SRC%|%BIN%|s#// CRASH-INJECT-POINT#panic!("crash");#|42|
 OBS.java|Java|mkdir -p %BIN% && javac -d %BIN% %SRC%|java -cp %BIN% OBS|s,// CRASH-INJECT-POINT,crashExit(42);,|42|
 OBS.groovy|Groovy||groovy %SRC%|s,// CRASH-INJECT-POINT,System.exit(42);,|42|
+OBS.rb|Ruby|ruby -c %SRC%|ruby %SRC%|s,# CRASH-INJECT-POINT,exit 42;,|42|
