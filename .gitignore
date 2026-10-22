@@ -1,6 +1,12 @@
 *
 !.gitignore
-!OBS.sh
 !README.md
+!OBS.sh
+!OBS.py
+!docs/
+!docs/**
 !tests/
 !tests/**
+tests/build/
+*.pyc
+__pycache__/

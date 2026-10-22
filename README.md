@@ -4,6 +4,34 @@ Study/break timer protocol for study livestreams. A Bash script that runs a
 Pomodoro-style study loop and writes its live state to text files, which you
 can display in OBS Studio as Text sources.
 
+**`OBS.sh` is the reference implementation.** The same program is also
+available as native ports in many other languages (see below); every port
+follows the same behavior contract and is tested with the same suite.
+
+## Language ports
+
+Besides `OBS.sh` you can run the panel in the languages below. Every port
+is a full, standalone re-implementation of `OBS.sh` - not a wrapper - with
+the same options, keys, themes, config file, state files, log, exit codes
+and cleanup behavior. `docs/port-spec.md` is the shared behavior contract;
+`docs/language-notes.md` lists per-language specifics and known limitations.
+
+| File | Language | Version used for testing | Build / run |
+|------|----------|--------------------------|-------------|
+| `OBS.sh` | Bash (reference) | Bash 5.2 | `./OBS.sh <rounds> <study> <break>` |
+| `OBS.py` | Python | 3.12 | `python3 OBS.py <rounds> <study> <break>` |
+
+Common notes for the ports:
+
+- The config file keeps its bash syntax in every port (it is interpreted
+  with the system's `bash`, exactly like the reference sources it).
+- `--dry-run`, the pty-driven interactive keys (pause/skip/quit/Alt+T), the
+  signal exit codes (130/143/129) and the never-frozen-timer cleanup all
+  behave the same. See `docs/language-notes.md` for the details of each
+  language.
+- Compiled languages need their toolchain installed (`docs/language-notes.md`
+  lists the exact versions); interpreted ones just need the runtime.
+
 ## Requirements
 
 - Linux with Bash 4.2+
@@ -191,9 +219,14 @@ file is missing, the script falls back to the default output / skips the sound.
 ## Tests
 
 ```bash
-./tests/run-tests.sh
+./tests/run-tests.sh        # reference suite for OBS.sh (85 checks)
+./tests/test-port.sh OBS.py # the same battery for a single port
+./tests/run-all-ports.sh   # every port from tests/ports.tsv
 ```
 
-85 checks that run in about a minute, in `--dry-run` mode inside a throwaway
-directory. The interactive keys and the signal handling are driven through a
-pty, and those tests are skipped when util-linux `script` is not installed.
+The reference suite and the per-port suite run in `--dry-run` mode inside a
+throwaway state directory, so they finish in seconds and never touch the
+real OBS files or play the alarm. The interactive keys and the signal
+handling are driven through a pty, and those tests are skipped when
+util-linux `script` is not installed. `TESTS_QUICK=1` skips the pty section
+of a port suite (useful during development).
