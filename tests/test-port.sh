@@ -38,7 +38,7 @@ trap 'rm -f "$BIN" "$BIN".*' EXIT
 
 [[ -z "$BUILD" ]] || {
     b="${BUILD//%SRC%/$SRC}"; b="${b//%BIN%/$BIN}"; b="${b//%DIR%/$BUILD_DIR}"
-    if ! $b > "$BUILD_DIR/${FILE}.build.log" 2>&1; then
+    if ! bash -c "$b" > "$BUILD_DIR/${FILE}.build.log" 2>&1; then
         echo "BUILD FAILED for $FILE (see tests/build/${FILE}.build.log):" >&2
         tail -20 "$BUILD_DIR/${FILE}.build.log" >&2
         exit 2
@@ -368,12 +368,13 @@ section "Unexpected death"
 if [[ -z "$CRASH_SED" ]]; then
     printf '  \033[0;33mskip\033[0m crash injection (not applicable to %s)\n' "$LANG_NAME"
 else
-    CRASH_SRC="$TMP/crash.${FILE##*.}"
+    mkdir -p "$TMP/crash-src"
+    CRASH_SRC="$TMP/crash-src/OBS.${FILE##*.}"
     sed -e "$CRASH_SED" "$SRC" > "$CRASH_SRC" || { bad "crash injection" "sed failed"; }
     CRASH_BIN="$BUILD_DIR/${FILE}.crash.$$"
     if [[ -n "$BUILD" ]]; then
         b="${BUILD//%SRC%/$CRASH_SRC}"; b="${b//%BIN%/$CRASH_BIN}"; b="${b//%DIR%/$BUILD_DIR}"
-        if ! $b > "$TMP/crash.build.log" 2>&1; then
+        if ! bash -c "$b" > "$TMP/crash.build.log" 2>&1; then
             bad "crash variant builds" "see $TMP/crash.build.log"
         fi
     fi
