@@ -1,0 +1,18 @@
+# tests/ports.tsv - manifest of every language port.
+#
+# Fields, separated by '|':
+#   1. file       repo-relative source file
+#   2. language   display name
+#   3. build      compile / syntax-check command; empty = run directly.
+#                 Placeholders: %SRC% = source path, %BIN% = artifact path,
+#                 %DIR% = build directory (already exists).
+#   4. run        command to run the port. Placeholders: %SRC%, %BIN%, %DIR%.
+#   5. crash sed  sed expression replacing the '# CRASH-INJECT-POINT'
+#                 marker line in the tick loop with code that aborts the
+#                 program unexpectedly; empty = crash test not applicable.
+#   6. crash rc   expected exit code of the crashed variant (default 42)
+#   7. flags      comma-separated: skip-pty (pty tests not supported)
+#
+# Run one port's suite:     ./tests/test-port.sh OBS.py
+# Run every port:            ./tests/run-all-ports.sh
+OBS.py|Python|python3 -m py_compile %SRC%|python3 %SRC%|s,# CRASH-INJECT-POINT,raise SystemExit(42),|42|
