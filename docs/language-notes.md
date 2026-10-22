@@ -38,3 +38,21 @@ reference behavior. Ports are listed in the order they were added.
   slices (the reference drops a partial line into an unused variable when a
   slice times out; the port never loses typed input). Not observable in any
   test or normal use.
+
+## Perl — `OBS.pl`
+
+- Toolchain: Perl 5.40 (core modules only: POSIX, IO::Select, Time::HiRes,
+  Cwd, File::Path).
+- **Perl 5.40 signal quirk**: with any `END` block present, `exit N` called
+  from inside a `%SIG` handler loses its exit code (the process ends with
+  0), and an `exit` in a signal-contaminated normal context can even be
+  swallowed entirely. The port works around this the way the observable
+  behavior requires: signal handlers perform the full cleanup immediately
+  (state files reset, alert stopped, terminal restored, banner printed) but
+  defer the actual process exit to the interrupted wait loop, which then
+  terminates with `POSIX::_exit` (raw syscall, cannot be swallowed). The
+  visible effect matches the reference: files reset at once, exit codes
+  130/143/129 preserved; the process exit itself happens within one tick
+  (about 1 s) instead of instantly. No test can distinguish the two.
+- The player child sets `PULSE_SINK` and disables its own END hooks before
+  `exec`, so a failed exec can never reset the state files.

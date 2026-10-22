@@ -18,3 +18,4 @@
 OBS.py|Python|python3 -m py_compile %SRC%|python3 %SRC%|s,# CRASH-INJECT-POINT,raise SystemExit(42),|42|
 OBS.js|JavaScript|node --check %SRC%|node %SRC%|s,// CRASH-INJECT-POINT,process.exit(42),|42|
 OBS.ts|TypeScript|mkdir -p %BIN% && tsc %SRC% --outDir %BIN% --module commonjs --target es2020 --skipLibCheck $TSC_FLAGS|node %BIN%/OBS.js|s,// CRASH-INJECT-POINT,process.exit(42),|42|
+OBS.pl|Perl|perl -c %SRC%|perl %SRC%|s,# CRASH-INJECT-POINT,exit 42;,|42|
