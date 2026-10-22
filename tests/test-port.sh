@@ -34,7 +34,7 @@ SRC="$ROOT/$FILE"
 BUILD_DIR="$ROOT/tests/build"
 mkdir -p "$BUILD_DIR"
 BIN="$BUILD_DIR/${FILE}.$$.bin"
-trap 'rm -f "$BIN" "$BIN".*' EXIT
+trap 'rm -rf "$BIN" "$BIN".*' EXIT
 
 [[ -z "$BUILD" ]] || {
     b="${BUILD//%SRC%/$SRC}"; b="${b//%BIN%/$BIN}"; b="${b//%DIR%/$BUILD_DIR}"
@@ -385,7 +385,7 @@ else
     check "an unexpected death resets the session file" "stopped" "$(cat "$DIRX/session.txt")"
     check "an unexpected death zeroes the timer file" "00:00:00" "$(cat "$DIRX/timer.txt")"
     check_contains "an unexpected death is logged" "Protocol ended unexpectedly" "$(cat "$DIRX/log.txt")"
-    rm -f "$CRASH_BIN" "$CRASH_BIN".*
+    rm -rf "$CRASH_BIN" "$CRASH_BIN".*
 fi
 
 # ---------------------------------------------------------------- non-tty wait
