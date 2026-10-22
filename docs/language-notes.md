@@ -66,3 +66,15 @@ reference behavior. Ports are listed in the order they were added.
   normal goroutine, so the cleanup code has no async-signal-safety limits.
 - The crash-test injection is a `panic`, recovered in `main`, which resets
   the state files and exits with the injected code.
+
+## Rust — `OBS.rs`
+
+- Toolchain: Rust 1.99 (edition 2021, standard library only).
+- The POSIX surface Rust's std does not expose (termios, select, sigaction,
+  localtime_r/strftime, kill) is declared via `extern "C"` against the libc
+  that every Rust binary links - no external crates are needed.
+- Signal handlers are installed without `SA_RESTART` so the 1-second waits
+  wake up; the handler performs the cleanup directly (the reference's trap
+  does the same work) and exits with 130/143/129.
+- The crash-test injection is a `panic!`, caught by `catch_unwind` in
+  `main`, which resets the state files and exits with the injected code.
