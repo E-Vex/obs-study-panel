@@ -56,3 +56,13 @@ reference behavior. Ports are listed in the order they were added.
   (about 1 s) instead of instantly. No test can distinguish the two.
 - The player child sets `PULSE_SINK` and disables its own END hooks before
   `exec`, so a failed exec can never reset the state files.
+
+## Go — `OBS.go`
+
+- Toolchain: Go 1.27 (standard library only; `go.mod` at the repo root makes
+  `go build OBS.go` work outside GOPATH).
+- Keyboard input is a reader goroutine feeding a byte channel; every wait is
+  a select with a timeout. Signals are handled through `os/signal` in a
+  normal goroutine, so the cleanup code has no async-signal-safety limits.
+- The crash-test injection is a `panic`, recovered in `main`, which resets
+  the state files and exits with the injected code.

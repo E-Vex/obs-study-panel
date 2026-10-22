@@ -8,10 +8,14 @@
 !OBS.pl
 !OBS.c
 !OBS.cpp
+!OBS.go
+!go.mod
 !OBS.ts
 !OBS.pl
 !OBS.c
 !OBS.cpp
+!OBS.go
+!go.mod
 !docs/
 !docs/**
 !tests/
