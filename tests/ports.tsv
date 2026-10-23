@@ -27,3 +27,4 @@ OBS.java|Java|mkdir -p %BIN% && javac -d %BIN% %SRC%|java -cp %BIN% OBS|s,// CRA
 OBS.groovy|Groovy||groovy %SRC%|s,// CRASH-INJECT-POINT,System.exit(42);,|42|
 OBS.rb|Ruby|ruby -c %SRC%|ruby %SRC%|s,# CRASH-INJECT-POINT,exit 42;,|42|
 OBS.php|PHP|php -l %SRC%|php %SRC%|s,// CRASH-INJECT-POINT,crash_exit(42);,|42|
+OBS.lua|Lua (LuaJIT)|luajit -e "assert(loadfile('%SRC%'))"|luajit %SRC%|s,-- CRASH-INJECT-POINT,crash_exit(42),|42|
