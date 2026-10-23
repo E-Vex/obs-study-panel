@@ -32,3 +32,4 @@ OBS.cs|C#|mkdir -p %BIN% && printf '%s' '<Project Sdk="Microsoft.NET.Sdk"><Prope
 OBS.kt|Kotlin|mkdir -p %BIN% && kotlinc %SRC% -include-runtime -d %BIN%/obs.jar|java -jar %BIN%/obs.jar|s,// CRASH-INJECT-POINT,crashExit(42);,|42|
 OBS.zig|Zig|zig build-exe -O ReleaseSafe -lc %SRC% -femit-bin=%BIN%|%BIN%|s,// CRASH-INJECT-POINT,crashExit(42);,|42|
 OBS.nim|Nim|nim c -d:release --opt:speed --hints:off --warnings:off -o:%BIN% %SRC%|%BIN%|s,# CRASH-INJECT-POINT,crashExit(42),|42|
+OBS.d|D|ldc2 -O2 -release %SRC% -of=%BIN%|%BIN%|s,// CRASH-INJECT-POINT,crashExit(42);,|42|

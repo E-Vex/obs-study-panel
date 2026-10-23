@@ -19,6 +19,7 @@
 !OBS.kt
 !OBS.zig
 !OBS.nim
+!OBS.d
 !go.mod
 !OBS.ts
 !OBS.pl
@@ -35,6 +36,7 @@
 !OBS.kt
 !OBS.zig
 !OBS.nim
+!OBS.d
 !go.mod
 !docs/
 !docs/**
